@@ -15,6 +15,8 @@ interface Props {
   checkerOff?: boolean;
   // True until the app knows whether an upload checker is configured.
   attachDisabled?: boolean;
+  // The app could not say whether a checker is configured; attaching stays off.
+  checkerUnknown?: boolean;
   onFilesSelected(files: File[]): void;
   onDismissError(index: number): void;
   onRemove(attachmentId: string): Promise<void>;
@@ -44,6 +46,7 @@ export default function AttachmentComposer({
   zipOnly = false,
   checkerOff = false,
   attachDisabled = false,
+  checkerUnknown = false,
   onFilesSelected,
   onDismissError,
   onRemove,
@@ -152,6 +155,15 @@ export default function AttachmentComposer({
               title="No PHI checker is configured: attached files are not checked for protected health information before they reach the assistant."
             >
               PHI checker: off
+            </span>
+          ) : null}
+          {checkerUnknown ? (
+            <span
+              className="upload-checker-badge"
+              role="status"
+              title="The app could not report its upload settings. Attaching stays off and the check is retried."
+            >
+              Attaching unavailable, retrying
             </span>
           ) : null}
           {action}

@@ -36,6 +36,9 @@ First startup asks you to choose a data folder, configure a model provider,
 and acknowledge the generated Python execution warning.
 To change providers later, run `python run_fastapi.py --reconfigure`.
 
+An optional upload checker can screen uploads before they reach a
+conversation; it is off by default. See [docs/upload-plug.md](docs/upload-plug.md).
+
 ## Study data
 
 Install a study package to ask questions about its data. For example, use the

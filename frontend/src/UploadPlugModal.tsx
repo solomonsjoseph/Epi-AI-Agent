@@ -30,6 +30,11 @@ export function parsePlugMessage(
   }
   const message = data as Record<string, unknown>;
   if (message.contract !== contract) {
+    // A plug on another contract version says so with an error; report that instead of
+    // waiting for the ready timeout. Any other message from it is ignored.
+    if (message.type === "error" && typeof message.contract === "string") {
+      return { type: "error", contract: message.contract, code: "PLUG_CONTRACT_MISMATCH" };
+    }
     return null;
   }
   switch (message.type) {

@@ -56,6 +56,7 @@ from utils.upload_plug import (
     UploadPlugError,
     UploadPlugSettings,
     fetch_delivery,
+    quiet_http_logs,
 )
 
 
@@ -242,6 +243,8 @@ def create_app(
     attachment_limits = runtime.attachment_limits
     plug = upload_plug if upload_plug is not None else UploadPlugSettings.from_env()
     plug.validate()
+    if plug.enabled:
+        quiet_http_logs()
 
     app.add_middleware(
         AttachmentRequestBodyLimitMiddleware,
@@ -505,9 +508,19 @@ def create_app(
                     # Unreferenced staged files expire with the staging TTL and
                     # their ids never reach the browser, so they cannot be sent.
                     pass
+            # Codes only (fixed enums): the delivery is already spent, so say why it failed.
+            codes = sorted(
+                {
+                    str(error["code"] if isinstance(error, dict) else error.code)
+                    for error in result.errors
+                }
+            )
             raise HTTPException(
                 status_code=422,
-                detail="PLUG_REJECTED: the app could not stage every prepared file",
+                detail=(
+                    "PLUG_REJECTED: the app could not stage every prepared file "
+                    f"({', '.join(codes)}); upload the ZIP again"
+                ),
             )
         return result
 

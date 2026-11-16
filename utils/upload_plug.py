@@ -7,7 +7,9 @@ handle. This module then pulls the prepared files from the plug, server to
 server, with a shared secret, and returns them in the same shape the plain
 upload route stages.
 
-The app knows nothing about what the plug does to the files.
+The app does not look inside the prepared files beyond checking their size,
+hash and type; what the plug does to them is the plug's business. The only
+visible change with a plug set is the paperclip accepting a ZIP only.
 """
 
 from __future__ import annotations
@@ -17,13 +19,10 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import quote, urlsplit
 
 import httpx
-
-# httpx logs every request URL at INFO, and delivery URLs carry the handle and thread id.
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
 CONTRACT_VERSION = "1"
 
@@ -51,7 +50,7 @@ class UploadPlugError(Exception):
 @dataclass(frozen=True)
 class UploadPlugSettings:
     url: str = ""
-    secret: str = ""
+    secret: str = field(default="", repr=False)
     timeout_seconds: float = 30.0
     transport: httpx.BaseTransport | None = None
 
@@ -61,8 +60,14 @@ class UploadPlugSettings:
 
     @property
     def origin(self) -> str:
+        """The origin a browser reports for the plug's page: lowercase host, default port dropped."""
         parts = urlsplit(self.url)
-        return f"{parts.scheme}://{parts.netloc}"
+        host = (parts.hostname or "").lower()
+        if ":" in host:
+            host = f"[{host}]"
+        default = {"http": 80, "https": 443}.get(parts.scheme)
+        port = f":{parts.port}" if parts.port and parts.port != default else ""
+        return f"{parts.scheme}://{host}{port}"
 
     @classmethod
     def from_env(cls) -> "UploadPlugSettings":
@@ -85,6 +90,12 @@ class UploadPlugSettings:
             raise ValueError(f"{PLUG_URL_ENV} must use https unless it is on this computer")
         if parts.query or parts.fragment or parts.username or parts.password:
             raise ValueError(f"{PLUG_URL_ENV} must not carry a query, fragment or credentials")
+        if parts.path not in ("", "/"):
+            raise ValueError(f"{PLUG_URL_ENV} must be the plug's origin only, with no path")
+        try:
+            parts.port
+        except ValueError as exc:
+            raise ValueError(f"{PLUG_URL_ENV} has an invalid port") from exc
         if len(self.secret) < _MIN_SECRET_CHARS:
             raise ValueError(
                 f"{PLUG_SECRET_ENV} must be set (at least {_MIN_SECRET_CHARS} characters) "
@@ -92,6 +103,12 @@ class UploadPlugSettings:
             )
         if self.timeout_seconds <= 0:
             raise ValueError(f"{PLUG_TIMEOUT_ENV} must be positive")
+
+
+def quiet_http_logs() -> None:
+    """httpx logs every request URL at INFO, and delivery URLs carry the handle and thread id.
+    Called only when a plug is configured, so a plain app keeps its logging as before."""
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def validate_handle(handle: str) -> str:
@@ -132,7 +149,7 @@ def fetch_delivery(
     if not settings.enabled:
         raise UploadPlugError("PLUG_UNREACHABLE", "no upload plug is configured")
     validate_handle(handle)
-    base = f"{settings.url}/v1/deliveries/{quote(handle, safe='')}"
+    base = f"{settings.url.rstrip('/')}/v1/deliveries/{quote(handle, safe='')}"
     headers = {
         "Authorization": f"Bearer {settings.secret}",
         "X-Gate-Contract": CONTRACT_VERSION,

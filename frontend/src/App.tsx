@@ -208,6 +208,7 @@ export default function App({
   // Set once the app has answered whether an upload plug is configured. Until then, and if the
   // answer fails, attaching stays disabled: an unknown checker state never falls back to "off".
   const [uploadPlugChecked, setUploadPlugChecked] = useState(false);
+  const [uploadPlugCheckFailed, setUploadPlugCheckFailed] = useState(false);
   const [pendingPlugUpload, setPendingPlugUpload] = useState<{
     threadId: string;
     generation: number;
@@ -224,22 +225,36 @@ export default function App({
 
   useEffect(() => {
     let isMounted = true;
+    let retryTimer: number | undefined;
     // Optional upload plug. When the app reports none, uploads work as before.
-    Promise.resolve(apiClient.getUploadPlug?.())
-      .then((plug) => {
-        if (isMounted) {
-          setUploadPlug(plug ?? null);
-          setUploadPlugChecked(true);
-        }
-      })
-      .catch(() => {
-        if (isMounted) {
+    // Until the app answers, attaching stays off (never falls back to "no checker");
+    // a failed check is retried and explained.
+    const check = (attempt: number) => {
+      Promise.resolve(apiClient.getUploadPlug?.())
+        .then((plug) => {
+          if (isMounted) {
+            setUploadPlug(plug ?? null);
+            setUploadPlugChecked(true);
+            setUploadPlugCheckFailed(false);
+          }
+        })
+        .catch(() => {
+          if (!isMounted) {
+            return;
+          }
           setUploadPlug(null);
           setUploadPlugChecked(false);
-        }
-      });
+          setUploadPlugCheckFailed(true);
+          retryTimer = window.setTimeout(
+            () => check(attempt + 1),
+            Math.min(30_000, 2_000 * 2 ** attempt),
+          );
+        });
+    };
+    check(0);
     return () => {
       isMounted = false;
+      window.clearTimeout(retryTimer);
     };
   }, [apiClient]);
 
@@ -805,7 +820,13 @@ export default function App({
   }
 
   async function selectPlugAttachment(file: File) {
-    const activeThreadId = await ensureThread();
+    let activeThreadId: string | null | undefined;
+    try {
+      activeThreadId = await ensureThread();
+    } catch (threadError) {
+      setError(errorMessage(threadError));
+      return;
+    }
     if (!activeThreadId) {
       return;
     }
@@ -876,9 +897,11 @@ export default function App({
         message:
           code === "PLUG_UNREACHABLE"
             ? "the upload checker could not be reached; nothing was uploaded"
-            : PLUG_LIMIT_CODES.has(code)
+            : code === "PLUG_CONTRACT_MISMATCH"
+              ? "the upload checker speaks a different version of the upload contract; nothing was uploaded"
+              : PLUG_LIMIT_CODES.has(code)
               ? "the prepared files exceed this app's attachment limits; nothing was uploaded"
-              : "the upload checker did not release this file; nothing was uploaded",
+                : "the upload checker did not release this file; nothing was uploaded",
       },
     ]);
   }
@@ -1560,6 +1583,7 @@ export default function App({
               zipOnly={uploadPlug !== null}
               checkerOff={uploadPlugChecked && uploadPlug === null}
               attachDisabled={!uploadPlugChecked}
+              checkerUnknown={uploadPlugCheckFailed}
             />
           </form>
           {uploadPlug && pendingPlugUpload ? (

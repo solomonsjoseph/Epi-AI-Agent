@@ -323,6 +323,7 @@ def test_plug_partial_staging_is_rolled_back() -> None:
     runtime = PartialRuntime()
     response = _pull(_plug_client(runtime, FakePlug(FILES)))
     assert response.status_code == 422
+    assert "UNSUPPORTED_FORMAT" in response.json()["detail"]
     assert runtime.discarded == ["attachment-" + "0" * 32]
 
 
@@ -334,6 +335,8 @@ def test_plug_partial_staging_is_rolled_back() -> None:
         ("http://example.com", SECRET),
         ("ftp://127.0.0.1:8090", SECRET),
         ("http://127.0.0.1:8090/?x=1", SECRET),
+        ("http://127.0.0.1:8090/gate", SECRET),
+        ("http://127.0.0.1:99999", SECRET),
     ],
 )
 def test_half_configured_plug_refuses_to_start(url: str, secret: str) -> None:
@@ -378,3 +381,47 @@ def test_gateway_errors_are_unreachable_not_rejected() -> None:
         with pytest.raises(UploadPlugError) as caught:
             _raise_for_status(httpx.Response(status))
         assert caught.value.code == "PLUG_UNREACHABLE"
+
+
+@pytest.mark.parametrize(
+    "url, origin",
+    [
+        ("http://127.0.0.1:8090", "http://127.0.0.1:8090"),
+        ("http://LOCALHOST:8090", "http://localhost:8090"),
+        ("https://Gate.Example.org:443", "https://gate.example.org"),
+        ("http://127.0.0.1:80/", "http://127.0.0.1"),
+        ("http://[::1]:8090", "http://[::1]:8090"),
+    ],
+)
+def test_plug_origin_is_what_the_browser_reports(url: str, origin: str) -> None:
+    assert UploadPlugSettings(url=url, secret=SECRET).origin == origin
+
+
+def test_plug_secret_is_not_in_the_settings_repr() -> None:
+    assert SECRET not in repr(UploadPlugSettings(url=PLUG_URL, secret=SECRET))
+
+
+def test_plug_off_leaves_http_logging_alone() -> None:
+    import logging
+
+    logger = logging.getLogger("httpx")
+    logger.setLevel(logging.NOTSET)
+    create_app(FakeRuntime(), provider_api_key="unused", upload_plug=UploadPlugSettings())
+    assert logger.level == logging.NOTSET
+    create_app(
+        FakeRuntime(),
+        provider_api_key="unused",
+        upload_plug=UploadPlugSettings(url=PLUG_URL, secret=SECRET),
+    )
+    assert logger.level == logging.WARNING
+
+
+def test_plug_pull_logs_no_handle_secret_or_thread(caplog) -> None:
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    response = _pull(_plug_client(FakeRuntime(), FakePlug(FILES)))
+    assert response.status_code == 200
+    text = caplog.text + json.dumps(response.json())
+    assert SECRET not in text
+    assert HANDLE not in caplog.text
