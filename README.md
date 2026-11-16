@@ -36,9 +36,6 @@ First startup asks you to choose a data folder, configure a model provider,
 and acknowledge the generated Python execution warning.
 To change providers later, run `python run_fastapi.py --reconfigure`.
 
-An optional upload checker can screen uploads before they reach a
-conversation; it is off by default. See [docs/upload-plug.md](docs/upload-plug.md).
-
 ## Study data
 
 Install a study package to ask questions about its data. For example, use the
@@ -81,3 +78,67 @@ Analysis results are staged for your review.
 To add a Python package, update `requirements.txt`, stop the app, and run
 `uv pip install -r requirements.txt` before restarting. See
 [the execution policy](tools/python_execution_policy.md) for details.
+
+## Optional upload checker (upload plug)
+
+The paperclip can hand uploads to a separate checker service (a "plug") before
+anything reaches a conversation. It is off by default.
+
+### Settings
+
+Set both in `.env` (or the environment) to turn it on:
+
+| Variable | Meaning |
+| --- | --- |
+| `REPORT_AGENT_UPLOAD_PLUG_URL` | The plug's origin only, for example `http://127.0.0.1:8090`. No path, query or credentials. Plain `http` only for `127.0.0.1`, `localhost` or `::1`; otherwise `https`. |
+| `REPORT_AGENT_UPLOAD_PLUG_SECRET` | Shared secret, at least 32 characters. The app refuses to start if the URL is set without it. |
+| `REPORT_AGENT_UPLOAD_PLUG_TIMEOUT_SECONDS` | Server-to-server timeout, default 30. |
+
+With no URL, the app behaves as before and shows a "PHI checker: off" badge next
+to the paperclip.
+
+### What changes when it is on
+
+- The paperclip accepts one `.zip` file only. Plain uploads to
+  `/api/threads/{id}/attachments` are refused (409) before the body is read.
+- The ZIP is shown to the plug's page in a modal (iframe). The app never stores
+  or attaches the ZIP itself.
+- When the plug releases the prepared files, the browser gets only an opaque
+  handle. The app pulls the files from the plug server to server, checks size,
+  sha256 and type, and stages them all or none, as a normal upload.
+
+### Contract version 1 (pinned)
+
+Browser and plug page (`postMessage`, exact origin and source window checked
+both ways):
+
+- The app loads `{origin}/embed?thread_id={id}&contract=1`.
+- Plug to app: `{type: "ready"}`, `{type: "done", thread_id, handle}`,
+  `{type: "cancel"}`, `{type: "error", code}`; every message carries
+  `contract: "1"`. Codes are `[A-Z_]` only; anything else becomes
+  `PLUG_REJECTED`. An `error` on another contract version is shown as a
+  contract mismatch.
+- App to plug, after `ready`: `{type: "file", contract, thread_id, caps, file}`.
+  `caps` holds this app's limits: `max_files`, `max_file_bytes`,
+  `max_total_bytes`, `max_table_rows`, `max_table_columns`, `max_table_cells`.
+- A handle matches `^[A-Za-z0-9_-]{16,128}$`.
+
+App server and plug (`Authorization: Bearer {secret}`, `X-Gate-Contract: 1`,
+query `thread_id`, no redirects, no proxy settings from the environment):
+
+- `GET {url}/v1/deliveries/{handle}` returns
+  `{contract: "1", files: [{name, mime, size, sha256}, ...]}`.
+- `GET {url}/v1/deliveries/{handle}/files/{index}` returns the file bytes.
+- A delivery can be pulled once.
+
+### Limits
+
+- Native run only: `compose.yaml` does not pass the plug variables.
+- Open the app at the exact origin the plug expects (`127.0.0.1` and
+  `localhost` are different origins).
+- With the plug on, images and loose files cannot be attached.
+- Typed chat text is not checked by the plug.
+- If staging fails after the pull, the delivery is spent: upload the ZIP again.
+  The error lists the app's reason codes.
+- The checker this was built for (epi-phi-gate) is pre-1.0, tested on synthetic
+  data only, and not cleared for real protected health information.
