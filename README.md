@@ -103,19 +103,28 @@ to the paperclip.
   `/api/threads/{id}/attachments` are refused (409) before the body is read.
 - The ZIP is shown to the plug's page in a modal (iframe). The app never stores
   or attaches the ZIP itself.
-- When the plug releases the prepared files, the browser gets only an opaque
-  handle. The app pulls the files from the plug server to server, checks size,
-  sha256 and type, and stages them all or none, as a normal upload.
+- When the plug releases the cleaned study ZIP, the browser gets only an opaque
+  handle. The app pulls the ZIP from the plug server to server, opens it in
+  memory (the ZIP itself is never written to disk or logged), checks it against
+  the plug's manifest and stages each file under its own name
+  (`dataset_1.csv`), all or none, through the normal upload checks.
+- Files staged this way show a "De-identified" badge on the composer chip and
+  the message card. The model sees a `deidentified` mark on them and one fixed
+  sentence: the upload checker can miss some identifiers, bracketed tokens such
+  as `[NAME]` or `[DATE]` stand for removed values, date columns may hold day
+  offsets and ID columns hold study IDs. The badge says the files came through
+  the configured plug, not that no protected health information remains.
+  Plain uploads and files the app derives later are never marked.
 
-### Contract version 1 (pinned)
+### Contract version 2 (pinned)
 
 Browser and plug page (`postMessage`, exact origin and source window checked
 both ways):
 
-- The app loads `{origin}/embed?thread_id={id}&contract=1`.
+- The app loads `{origin}/embed?thread_id={id}&contract=2`.
 - Plug to app: `{type: "ready"}`, `{type: "done", thread_id, handle}`,
   `{type: "cancel"}`, `{type: "error", code}`; every message carries
-  `contract: "1"`. Codes are `[A-Z_]` only; anything else becomes
+  `contract: "2"`. Codes are `[A-Z_]` only; anything else becomes
   `PLUG_REJECTED`. An `error` on another contract version is shown as a
   contract mismatch.
 - App to plug, after `ready`: `{type: "file", contract, thread_id, caps, file}`.
@@ -123,12 +132,25 @@ both ways):
   `max_total_bytes`, `max_table_rows`, `max_table_columns`, `max_table_cells`.
 - A handle matches `^[A-Za-z0-9_-]{16,128}$`.
 
-App server and plug (`Authorization: Bearer {secret}`, `X-Gate-Contract: 1`,
+App server and plug (`Authorization: Bearer {secret}`, `X-Gate-Contract: 2`,
 query `thread_id`, no redirects, no proxy settings from the environment):
 
 - `GET {url}/v1/deliveries/{handle}` returns
-  `{contract: "1", files: [{name, mime, size, sha256}, ...]}`.
-- `GET {url}/v1/deliveries/{handle}/files/{index}` returns the file bytes.
+  `{contract: "2", archive: {size, sha256}, members: [{path, mime, size, sha256}, ...]}`.
+  Each `path` is a role folder and a neutral name: `dataset/dataset_N`,
+  `dictionary/dictionary_N`, `forms/form_N` or `metadata/metadata_N`, with
+  `.csv`, `.tsv`, `.xlsx`, `.txt`, `.md`, `.json`, `.xml` or `.docx`.
+- Before the archive is fetched, the app checks every path, that file names are
+  unique ignoring case, its file count, per-file and total caps, and that
+  `archive.size` is at most `sum(size) + 22 + sum(76 + 2 * len(path))`. A
+  delivery refused here is not spent.
+- `GET {url}/v1/deliveries/{handle}/archive` returns the ZIP, read up to
+  `archive.size` and checked against `archive.sha256`.
+- The ZIP's entries must be exactly the manifest's paths (no extra, missing,
+  duplicate, directory, absolute, `..` or backslash entry), not encrypted,
+  stored or deflated only, each with its manifest size and sha256. Any failure
+  refuses the whole delivery with a fixed `PLUG_REJECTED` message; a 409 is
+  `CONTRACT_MISMATCH`.
 - A delivery can be pulled once.
 
 ### Limits
