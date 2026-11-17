@@ -425,7 +425,10 @@ class LocalAttachmentStore:
         filename: str,
         declared_mime: str,
         content: bytes,
+        *,
+        deidentified: bool = False,
     ) -> dict[str, Any]:
+        # deidentified is set only by the server's upload plug route, never from a request.
         if len(content) > self.limits.max_bytes:
             raise AttachmentError(
                 "FILE_TOO_LARGE",
@@ -440,6 +443,7 @@ class LocalAttachmentStore:
             "id": attachment_id,
             "thread_id": thread_id,
             "origin": "uploaded",
+            "deidentified": deidentified is True,
             "kind": detected["kind"],
             "format": detected["format"],
             "filename": filename,

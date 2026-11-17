@@ -93,6 +93,7 @@ def _manifest_card(manifest: dict[str, Any]) -> dict[str, Any]:
         "mime": str(manifest.get("mime") or ""),
         "byte_size": int(manifest.get("byte_size") or 0),
         "status": str(manifest.get("status") or ""),
+        "deidentified": manifest.get("deidentified") is True,
     }
 
 
@@ -544,6 +545,8 @@ class AttachmentReaderService:
             "mime": mime,
             "byte_size": int(value.get("byte_size") or 0),
             "status": "available",
+            # A conversation file or dataset is derived by the app, so it is never flagged.
+            "deidentified": False,
         }
 
     def _read_bytes(

@@ -36,6 +36,7 @@ class FakeRuntime:
     staged: list[tuple[str, list[tuple[str, str, bytes]]]] = field(
         default_factory=list
     )
+    deidentified: list[bool] = field(default_factory=list)
 
     def authorize_thread(self, identity, thread_id: str) -> None:
         if thread_id != THREAD_ID:
@@ -44,19 +45,20 @@ class FakeRuntime:
     def runtime_info(self) -> RuntimeInfo:
         return RuntimeInfo(model_name="fake-model")
 
-    def stage_attachments(self, identity, thread_id, uploads):
+    def stage_attachments(self, identity, thread_id, uploads, *, deidentified=False):
         self.staged.append((thread_id, list(uploads)))
+        self.deidentified.append(deidentified)
         return AttachmentUploadResult(
             attachments=[
                 AttachmentManifestSummary.model_validate(
-                    _summary(index, name, content)
+                    _summary(index, name, content, deidentified)
                 )
                 for index, (name, _mime, content) in enumerate(uploads)
             ]
         )
 
 
-def _summary(index: int, name: str, content: bytes) -> dict:
+def _summary(index: int, name: str, content: bytes, deidentified: bool = False) -> dict:
     fields = AttachmentManifestSummary.model_fields
     values = {
         "id": f"attachment-{index:032x}",
@@ -65,6 +67,7 @@ def _summary(index: int, name: str, content: bytes) -> dict:
         "mime": "text/csv",
         "byte_size": len(content),
         "status": "staged",
+        "deidentified": deidentified,
     }
     return {key: value for key, value in values.items() if key in fields}
 
@@ -320,6 +323,49 @@ def test_plug_pull_unzips_and_stages_members_by_basename() -> None:
     ]
     assert all(r.headers["x-gate-contract"] == "2" for r in plug.requests)
     assert all(r.url.params["thread_id"] == THREAD_ID for r in plug.requests)
+
+
+def test_plug_pull_stages_files_flagged_deidentified() -> None:
+    runtime = FakeRuntime()
+    response = _pull(_plug_client(runtime, FakePlug()))
+    assert response.status_code == 200
+    assert runtime.deidentified == [True]
+    assert [a["deidentified"] for a in response.json()["attachments"]] == [True, True]
+
+
+def test_plain_upload_is_never_flagged_even_if_the_form_asks(
+    client: TestClient, runtime: FakeRuntime
+) -> None:
+    # The multipart route has no such field; an extra form field changes nothing.
+    response = client.post(
+        f"/api/threads/{THREAD_ID}/attachments",
+        files=[("files", ("study.csv", b"a,b\n1,2\n", "text/csv"))],
+        data={"deidentified": "true"},
+    )
+    assert response.status_code == 200
+    assert runtime.deidentified == [False]
+    assert response.json()["attachments"][0]["deidentified"] is False
+
+
+def test_plug_request_refuses_a_deidentified_field() -> None:
+    runtime = FakeRuntime()
+    plug = FakePlug()
+    response = _plug_client(runtime, plug).post(
+        f"/api/threads/{THREAD_ID}/plug-attachments",
+        json={"handle": HANDLE, "deidentified": True},
+    )
+    assert response.status_code == 422
+    assert plug.requests == []
+    assert runtime.staged == []
+
+
+def test_message_request_refuses_a_deidentified_field(client: TestClient) -> None:
+    response = client.post(
+        f"/api/threads/{THREAD_ID}/messages",
+        json={"text": "hello", "attachment_ids": [], "deidentified": True},
+    )
+    assert response.status_code == 422
+    assert "deidentified" in json.dumps(response.json())
 
 
 def test_plug_pull_accepts_a_stored_archive_at_the_size_bound() -> None:
@@ -684,8 +730,10 @@ def test_plug_partial_staging_is_rolled_back() -> None:
     class PartialRuntime(FakeRuntime):
         discarded: list[str] = []
 
-        def stage_attachments(self, identity, thread_id, uploads):
-            result = super().stage_attachments(identity, thread_id, uploads[:1])
+        def stage_attachments(self, identity, thread_id, uploads, *, deidentified=False):
+            result = super().stage_attachments(
+                identity, thread_id, uploads[:1], deidentified=deidentified
+            )
             result.errors.append(
                 {"filename": uploads[1][0], "code": "UNSUPPORTED_FORMAT", "message": "x"}
             )

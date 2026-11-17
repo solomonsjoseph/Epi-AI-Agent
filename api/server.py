@@ -493,7 +493,9 @@ def create_app(
                 detail=f"{exc.code}: {exc.message}",
             ) from exc
         try:
-            result = runtime.stage_attachments(identity, thread_id, uploads)
+            result = runtime.stage_attachments(
+                identity, thread_id, uploads, deidentified=True
+            )
         except AttachmentError as exc:
             raise HTTPException(
                 status_code=422,
