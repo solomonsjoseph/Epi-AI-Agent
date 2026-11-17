@@ -8,7 +8,10 @@ model provider, database or network.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import warnings
+import zipfile
 from dataclasses import dataclass, field
 
 import httpx
@@ -122,29 +125,101 @@ PLUG_URL = "http://127.0.0.1:8090"
 SECRET = "s" * 40
 HANDLE = "h" * 32
 
+# Synthetic study files only. Repetitive rows keep DEFLATE well under the raw
+# size, so a fixture with one broken rule still fits the archive size bound and
+# is refused by the unzip checks, not before the fetch.
+DATASET = b"id,year,visit\n" + b"".join(
+    b"S%03d,2020,%d\n" % (row, row % 3) for row in range(200)
+)
+DICTIONARY = json.dumps(
+    {"variables": [{"name": "year", "label": "Year of visit"}] * 40}
+).encode()
+MEMBERS = [
+    ("dataset/dataset_1.csv", "text/csv", DATASET),
+    ("dictionary/dictionary_1.json", "application/json", DICTIONARY),
+]
+FIXED_TIME = (1980, 1, 1, 0, 0, 0)
 
-def _manifest(files, contract="1"):
+
+def _zip(entries, *, method=zipfile.ZIP_DEFLATED) -> bytes:
+    """Build a ZIP in memory from ``(name, content)`` or ``(name, content, method)``."""
+    buffer = io.BytesIO()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # duplicate-name fixtures warn on write
+        with zipfile.ZipFile(buffer, "w") as bundle:
+            for name, content, *rest in entries:
+                info = zipfile.ZipInfo(name, date_time=FIXED_TIME)
+                info.compress_type = rest[0] if rest else method
+                bundle.writestr(info, content)
+    return buffer.getvalue()
+
+
+def _member_zip(members=MEMBERS, *, method=zipfile.ZIP_DEFLATED) -> bytes:
+    return _zip([(path, content) for path, _mime, content in members], method=method)
+
+
+def _size_bound(members) -> int:
+    """v1_design 15.2: sum(sizes) + 22 + sum(76 + 2 * len(path))."""
+    return sum(len(content) for _path, _mime, content in members) + 22 + sum(
+        76 + 2 * len(path) for path, _mime, _content in members
+    )
+
+
+def _manifest(members=MEMBERS, archive: bytes | None = None, contract="2") -> dict:
+    archive = _member_zip(members) if archive is None else archive
     return {
         "contract": contract,
-        "files": [
+        "archive": {
+            "size": len(archive),
+            "sha256": hashlib.sha256(archive).hexdigest(),
+        },
+        "members": [
             {
-                "name": name,
+                "path": path,
+                "mime": mime,
                 "size": len(content),
                 "sha256": hashlib.sha256(content).hexdigest(),
-                "mime": "text/csv",
             }
-            for name, content in files
+            for path, mime, content in members
         ],
     }
 
 
+def _patch_first_entry(
+    archive: bytes, local_at: int, central_at: int | None, value: bytes
+) -> bytes:
+    """Overwrite bytes of the first entry in its local header and, unless None, its central entry."""
+    data = bytearray(archive)
+    data[local_at : local_at + len(value)] = value
+    if central_at is not None:
+        central = int.from_bytes(data[-6:-2], "little")  # end record: central directory offset
+        data[central + central_at : central + central_at + len(value)] = value
+    return bytes(data)
+
+
 class FakePlug:
-    def __init__(self, files, *, manifest=None, status=200, file_override=None):
-        self.files = files
-        self.manifest = manifest if manifest is not None else _manifest(files)
+    """A contract-2 plug: the manifest at the delivery URL, the ZIP at ``/archive``."""
+
+    def __init__(
+        self,
+        members=MEMBERS,
+        *,
+        archive: bytes | None = None,
+        manifest: dict | None = None,
+        status: int = 200,
+        archive_status: int = 200,
+        body: bytes = b"",
+    ):
+        self.archive = _member_zip(members) if archive is None else archive
+        self.manifest = manifest if manifest is not None else _manifest(members, self.archive)
         self.status = status
-        self.file_override = file_override or {}
+        self.archive_status = archive_status
+        self.body = body
         self.requests: list[httpx.Request] = []
+
+    @property
+    def archive_requested(self) -> bool:
+        return any(r.url.path.endswith("/archive") for r in self.requests)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -153,15 +228,15 @@ class FakePlug:
         if request.url.params.get("thread_id") != THREAD_ID:
             return httpx.Response(404)
         if self.status != 200:
-            return httpx.Response(self.status)
+            return httpx.Response(self.status, content=self.body)
         path = request.url.path
         base = f"/v1/deliveries/{HANDLE}"
         if path == base:
             return httpx.Response(200, content=json.dumps(self.manifest).encode())
-        if path.startswith(base + "/files/"):
-            index = int(path.rsplit("/", 1)[1])
-            content = self.file_override.get(index, self.files[index][1])
-            return httpx.Response(200, content=content)
+        if path == base + "/archive":
+            if self.archive_status != 200:
+                return httpx.Response(self.archive_status, content=self.body)
+            return httpx.Response(200, content=self.archive)
         return httpx.Response(404)
 
 
@@ -180,20 +255,17 @@ def _pull(client: TestClient, handle: str = HANDLE, thread: str = THREAD_ID):
     )
 
 
-FILES = [("dataset_1.csv", b"id,year\nS001,2020\n"), ("dictionary_1.xlsx", b"PK..")]
-
-
 def test_plug_off_hides_plug_routes(client: TestClient) -> None:
     assert client.get("/api/upload-plug").json() is None
     assert _pull(client).status_code == 404
 
 
 def test_plug_on_reports_origin_only() -> None:
-    client = _plug_client(FakeRuntime(), FakePlug(FILES))
+    client = _plug_client(FakeRuntime(), FakePlug())
     limits = AttachmentLimits()
     assert client.get("/api/upload-plug").json() == {
         "origin": PLUG_URL,
-        "contract": "1",
+        "contract": "2",
         "caps": {
             "max_files": limits.max_files_per_message,
             "max_file_bytes": limits.max_bytes,
@@ -207,13 +279,13 @@ def test_plug_on_reports_origin_only() -> None:
 
 def test_plug_caps_follow_the_configured_limits() -> None:
     runtime = FakeRuntime(attachment_limits=AttachmentLimits(max_files_per_message=3))
-    caps = _plug_client(runtime, FakePlug(FILES)).get("/api/upload-plug").json()["caps"]
+    caps = _plug_client(runtime, FakePlug()).get("/api/upload-plug").json()["caps"]
     assert caps["max_files"] == 3
 
 
 def test_plug_on_refuses_plain_upload() -> None:
     runtime = FakeRuntime()
-    client = _plug_client(runtime, FakePlug(FILES))
+    client = _plug_client(runtime, FakePlug())
     response = client.post(
         f"/api/threads/{THREAD_ID}/attachments",
         files=[("files", ("raw.csv", b"name\nJane\n", "text/csv"))],
@@ -223,57 +295,359 @@ def test_plug_on_refuses_plain_upload() -> None:
     assert runtime.staged == []
 
 
-def test_plug_pull_stages_verified_files() -> None:
+def test_plug_pull_unzips_and_stages_members_by_basename() -> None:
     runtime = FakeRuntime()
-    plug = FakePlug(FILES)
+    plug = FakePlug()
     response = _pull(_plug_client(runtime, plug))
     assert response.status_code == 200
     assert [a["filename"] for a in response.json()["attachments"]] == [
         "dataset_1.csv",
-        "dictionary_1.xlsx",
+        "dictionary_1.json",
     ]
-    assert runtime.staged[0][1][0] == ("dataset_1.csv", "text/csv", FILES[0][1])
-    assert all(r.headers["x-gate-contract"] == "1" for r in plug.requests)
+    assert runtime.staged == [
+        (
+            THREAD_ID,
+            [
+                ("dataset_1.csv", "text/csv", DATASET),
+                ("dictionary_1.json", "application/json", DICTIONARY),
+            ],
+        )
+    ]
+    # Contract 2 only: the manifest, then the one archive; never the per-file route.
+    assert [r.url.path for r in plug.requests] == [
+        f"/v1/deliveries/{HANDLE}",
+        f"/v1/deliveries/{HANDLE}/archive",
+    ]
+    assert all(r.headers["x-gate-contract"] == "2" for r in plug.requests)
+    assert all(r.url.params["thread_id"] == THREAD_ID for r in plug.requests)
+
+
+def test_plug_pull_accepts_a_stored_archive_at_the_size_bound() -> None:
+    archive = _member_zip(method=zipfile.ZIP_STORED)
+    assert len(archive) == _size_bound(MEMBERS)
+    runtime = FakeRuntime()
+    response = _pull(_plug_client(runtime, FakePlug(archive=archive)))
+    assert response.status_code == 200
+    assert [name for name, _mime, _content in runtime.staged[0][1]] == [
+        "dataset_1.csv",
+        "dictionary_1.json",
+    ]
+
+
+def test_plug_pull_stages_in_manifest_order_whatever_the_archive_order() -> None:
+    runtime = FakeRuntime()
+    archive = _member_zip(list(reversed(MEMBERS)))
+    response = _pull(_plug_client(runtime, FakePlug(archive=archive)))
+    assert response.status_code == 200
+    assert [name for name, _mime, _content in runtime.staged[0][1]] == [
+        "dataset_1.csv",
+        "dictionary_1.json",
+    ]
 
 
 @pytest.mark.parametrize(
     "handle", ["short", "../" + "a" * 30, "a" * 200, "a b" + "c" * 20]
 )
 def test_plug_bad_handle_never_calls_plug(handle: str) -> None:
-    plug = FakePlug(FILES)
+    plug = FakePlug()
     response = _pull(_plug_client(FakeRuntime(), plug), handle=handle)
     assert response.status_code == 422
     assert plug.requests == []
 
 
 def test_plug_unknown_thread_is_404() -> None:
-    plug = FakePlug(FILES)
+    plug = FakePlug()
     assert _pull(_plug_client(FakeRuntime(), plug), thread="other").status_code == 404
     assert plug.requests == []
 
 
+def _refused(plug: FakePlug, runtime: FakeRuntime | None = None) -> str:
+    """Pull, require a 422 with nothing staged, and return the detail."""
+    runtime = runtime or FakeRuntime()
+    response = _pull(_plug_client(runtime, plug))
+    assert response.status_code == 422
+    assert runtime.staged == []
+    return response.json()["detail"]
+
+
+# Manifest refusals: refused before the archive is fetched, so the delivery is not spent.
+
+
+def _with_paths(*paths: object) -> dict:
+    manifest = _manifest()
+    manifest["members"] = [
+        {**manifest["members"][0], "path": path} for path in paths
+    ]
+    return manifest
+
+
 @pytest.mark.parametrize(
-    "kwargs, code",
+    "path",
     [
-        ({"status": 403}, "PLUG_REJECTED"),
-        ({"status": 409}, "CONTRACT_MISMATCH"),
-        ({"manifest": _manifest(FILES, contract="2")}, "CONTRACT_MISMATCH"),
-        ({"file_override": {1: b"tampered"}}, "PLUG_REJECTED"),
-        ({"manifest": _manifest([("../evil.csv", b"x")])}, "PLUG_REJECTED"),
-        ({"manifest": _manifest([("a.csv", b"x"), ("A.csv", b"y")])}, "PLUG_REJECTED"),
-        ({"manifest": {"contract": "1", "files": []}}, "PLUG_REJECTED"),
+        "data/dataset_1.csv",
+        "dataset/form_1.csv",
+        "forms/forms_1.json",
+        "dictionary/dataset_1.csv",
+        "metadata/dictionary_1.md",
+        "dataset/dataset_0.csv",
+        "dataset/dataset_01.csv",
+        "dataset/dataset_10000.csv",
+        "dataset/dataset_1.pdf",
+        "dataset/dataset_1.CSV",
+        "Dataset/dataset_1.csv",
+        "dataset/dataset_1.csv\n",
+        "dataset/dataset_1.csv/",
+        "dataset_1.csv",
+        "study/dataset/dataset_1.csv",
+        "/dataset/dataset_1.csv",
+        "dataset/../dataset_1.csv",
+        "dataset\\dataset_1.csv",
+        "dataset//dataset_1.csv",
+        "",
+        5,
+        None,
+    ],
+)
+def test_plug_bad_path_is_refused_before_fetch(path: object) -> None:
+    plug = FakePlug(manifest=_with_paths(path))
+    assert _refused(plug).startswith("PLUG_REJECTED")
+    assert not plug.archive_requested
+
+
+def test_plug_duplicate_path_is_refused_before_fetch() -> None:
+    plug = FakePlug(manifest=_with_paths("dataset/dataset_1.csv", "dataset/dataset_1.csv"))
+    assert _refused(plug).startswith("PLUG_REJECTED")
+    assert not plug.archive_requested
+
+
+def test_plug_basenames_equal_ignoring_case_are_refused_before_fetch() -> None:
+    plug = FakePlug(manifest=_with_paths("dataset/dataset_1.csv", "dataset/DATASET_1.csv"))
+    assert _refused(plug).startswith("PLUG_REJECTED")
+    assert not plug.archive_requested
+
+
+def test_plug_basename_check_ignores_case() -> None:
+    # The path pattern is lowercase only; the name check still holds on its own.
+    from utils.upload_plug import UploadPlugError, _unique_names
+
+    _unique_names(["dataset_1.csv", "dataset_2.csv"])
+    with pytest.raises(UploadPlugError) as caught:
+        _unique_names(["dataset_1.csv", "DATASET_1.csv"])
+    assert caught.value.code == "PLUG_REJECTED"
+
+
+def _many_members(count: int) -> list[tuple[str, str, bytes]]:
+    return [(f"dataset/dataset_{i}.csv", "text/csv", b"a\n1\n") for i in range(1, count + 1)]
+
+
+@pytest.mark.parametrize(
+    "limits, members, code",
+    [
+        (AttachmentLimits(), _many_members(11), "TOO_MANY_FILES"),
+        (AttachmentLimits(max_bytes=len(DATASET) - 1), MEMBERS, "FILE_TOO_LARGE"),
         (
-            {"manifest": _manifest([(f"f{i}.csv", b"x") for i in range(11)])},
-            "TOO_MANY_FILES",
+            AttachmentLimits(max_message_bytes=len(DATASET) + len(DICTIONARY) - 1),
+            MEMBERS,
+            "MESSAGE_ATTACHMENTS_TOO_LARGE",
         ),
     ],
 )
-def test_plug_failures_stage_nothing(kwargs, code: str) -> None:
-    runtime = FakeRuntime()
-    response = _pull(_plug_client(runtime, FakePlug(FILES, **kwargs)))
-    assert response.status_code == 422
-    assert response.json()["detail"].startswith(code)
-    assert runtime.staged == []
+def test_plug_over_cap_manifest_is_not_fetched(limits, members, code: str) -> None:
+    plug = FakePlug(members)
+    detail = _refused(plug, FakeRuntime(attachment_limits=limits))
+    assert detail.startswith(code)
+    assert not plug.archive_requested
+
+
+def test_plug_archive_larger_than_the_size_bound_is_not_fetched() -> None:
+    manifest = _manifest()
+    manifest["archive"]["size"] = _size_bound(MEMBERS) + 1
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug).startswith("PLUG_REJECTED")
+    assert not plug.archive_requested
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda m: m.pop("members"),
+        lambda m: m.update(members=[]),
+        lambda m: m.pop("archive"),
+        lambda m: m["archive"].update(size=-1),
+        lambda m: m["archive"].update(size=True),
+        lambda m: m["archive"].update(sha256="0" * 63),
+        lambda m: m["members"][0].update(size="12"),
+        lambda m: m["members"][0].update(sha256="A" * 64),
+        lambda m: m["members"][0].update(mime=5),
+        lambda m: m.update(files=m.pop("members")),
+    ],
+)
+def test_plug_malformed_manifest_is_not_fetched(change) -> None:
+    manifest = _manifest()
+    change(manifest)
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug).startswith("PLUG_REJECTED")
+    assert not plug.archive_requested
+
+
+@pytest.mark.parametrize("contract", ["1", 2, "2.0", None])
+def test_plug_manifest_on_another_contract_is_a_mismatch(contract) -> None:
+    manifest = _manifest()
+    if contract is None:
+        manifest.pop("contract")
+    else:
+        manifest["contract"] = contract
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug).startswith("CONTRACT_MISMATCH")
+    assert not plug.archive_requested
+
+
+@pytest.mark.parametrize("on_archive", [False, True])
+def test_plug_409_is_a_fixed_contract_mismatch(on_archive: bool) -> None:
+    body = b"gate says: dataset/dataset_1.csv contract 1 only"
+    plug = (
+        FakePlug(archive_status=409, body=body)
+        if on_archive
+        else FakePlug(status=409, body=body)
+    )
+    assert _refused(plug) == (
+        "CONTRACT_MISMATCH: the upload plug uses a different contract version"
+    )
+    assert plug.archive_requested is on_archive
+
+
+def test_plug_403_and_spent_delivery_are_rejected() -> None:
+    assert _refused(FakePlug(status=403)).startswith("PLUG_REJECTED")
+    assert _refused(FakePlug(archive_status=404)).startswith("PLUG_REJECTED")
+
+
+# Archive refusals: the archive was fetched; nothing is staged.
+
+
+def _archive_refusal(archive: bytes, members=MEMBERS) -> str:
+    plug = FakePlug(members, archive=archive)
+    detail = _refused(plug)
+    assert plug.archive_requested
+    return detail
+
+
+def _stored_one(name: str = "dataset/dataset_1.csv", content: bytes = DATASET) -> bytes:
+    return _zip([(name, content)], method=zipfile.ZIP_STORED)
+
+
+ONE = MEMBERS[:1]
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        pytest.param([*MEMBERS, ("metadata/metadata_1.txt", "", b"x")], id="extra"),
+        pytest.param(MEMBERS[:1], id="missing"),
+        pytest.param([*MEMBERS, MEMBERS[0]], id="duplicate"),
+        pytest.param([*MEMBERS, ("dataset/", "", b"")], id="directory"),
+        pytest.param([*MEMBERS, ("/dataset/dataset_1.csv", "", b"x")], id="absolute"),
+        pytest.param([*MEMBERS, ("dataset/../x.csv", "", b"x")], id="dotdot"),
+        pytest.param([*MEMBERS, ("dataset\\x.csv", "", b"x")], id="backslash"),
+    ],
+)
+def test_plug_archive_entries_must_equal_the_manifest(entries) -> None:
+    archive = _zip([(path, content) for path, _mime, content in entries])
+    assert len(archive) <= _size_bound(MEMBERS)  # refused by the unzip, not the bound
+    detail = _archive_refusal(archive)
+    assert detail == "PLUG_REJECTED: the prepared archive does not match its manifest"
+
+
+def test_plug_entry_name_with_a_nul_byte_is_refused() -> None:
+    # zipfile cuts filename at a NUL, which would make it equal the manifest path.
+    name = "dataset/dataset_1.csv"
+    archive = _zip([(name + "Z", DATASET)])
+    archive = _patch_first_entry(archive, 30 + len(name), 46 + len(name), b"\x00")
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        assert bundle.infolist()[0].filename == name
+    detail = _archive_refusal(archive, ONE)
+    assert detail == "PLUG_REJECTED: the prepared archive does not match its manifest"
+
+
+def test_plug_encrypted_entry_is_refused() -> None:
+    archive = _patch_first_entry(_stored_one(), 6, 8, (1).to_bytes(2, "little"))
+    detail = _archive_refusal(archive, ONE)
+    assert detail == "PLUG_REJECTED: the prepared archive holds an encrypted file"
+
+
+def test_plug_other_compression_is_refused() -> None:
+    archive = _zip([("dataset/dataset_1.csv", DATASET, zipfile.ZIP_BZIP2)])
+    assert len(archive) <= _size_bound(ONE)
+    detail = _archive_refusal(archive, ONE)
+    assert detail == (
+        "PLUG_REJECTED: the prepared archive uses an unsupported compression method"
+    )
+
+
+def test_plug_entry_size_differing_from_the_manifest_is_refused() -> None:
+    archive = _zip([("dataset/dataset_1.csv", DATASET + b"S999,2020,0\n")])
+    detail = _archive_refusal(archive, ONE)
+    assert detail == "PLUG_REJECTED: the prepared archive does not match its manifest"
+
+
+def test_plug_entry_hash_differing_from_the_manifest_is_refused() -> None:
+    tampered = DATASET.replace(b"S007", b"S070", 1)
+    assert len(tampered) == len(DATASET)
+    detail = _archive_refusal(_zip([("dataset/dataset_1.csv", tampered)]), ONE)
+    assert detail == "PLUG_REJECTED: a prepared file did not match its checksum"
+
+
+def test_plug_archive_hash_mismatch_is_refused() -> None:
+    manifest = _manifest()
+    manifest["archive"]["sha256"] = hashlib.sha256(b"another archive").hexdigest()
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug) == "PLUG_REJECTED: the prepared archive did not match its checksum"
+    assert plug.archive_requested
+
+
+def test_plug_archive_longer_than_declared_is_refused() -> None:
+    archive = _member_zip()
+    manifest = _manifest(archive=archive)
+    manifest["archive"]["size"] = len(archive) - 1
+    plug = FakePlug(manifest=manifest, archive=archive)
+    assert _refused(plug) == "PLUG_REJECTED: the upload plug sent more data than declared"
+
+
+@pytest.mark.parametrize(
+    "archive",
+    [
+        pytest.param(b"not a zip archive at all", id="not-a-zip"),
+        # A wrong CRC: zipfile names the entry in its error.
+        pytest.param(_patch_first_entry(_stored_one(), 14, 16, b"\x00\x00\x00\x00"), id="crc"),
+        # Local header name differs from the central directory: zipfile echoes both names.
+        pytest.param(
+            _patch_first_entry(_stored_one(), 30, None, b"dataset/dataset_2.csv"),
+            id="header-name",
+        ),
+        pytest.param(_stored_one()[: len(_stored_one()) // 2], id="truncated"),
+    ],
+)
+def test_plug_zipfile_error_text_is_not_echoed(archive: bytes) -> None:
+    detail = _archive_refusal(archive, ONE)
+    assert detail == "PLUG_REJECTED: the prepared archive could not be read safely"
+
+
+def test_plug_zipfile_error_is_not_chained() -> None:
+    from utils.upload_plug import UploadPlugError, fetch_delivery
+
+    archive = _patch_first_entry(_stored_one(), 14, 16, b"\x00\x00\x00\x00")
+    settings = UploadPlugSettings(
+        url=PLUG_URL,
+        secret=SECRET,
+        transport=httpx.MockTransport(FakePlug(ONE, archive=archive)),
+    )
+    with pytest.raises(UploadPlugError) as caught:
+        fetch_delivery(
+            settings, HANDLE, THREAD_ID, max_files=10, max_file_bytes=10**6, max_total_bytes=10**7
+        )
+    assert caught.value.code == "PLUG_REJECTED"
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert "dataset_1" not in str(caught.value)
 
 
 def test_plug_unreachable_is_502_and_stages_nothing() -> None:
@@ -321,7 +695,7 @@ def test_plug_partial_staging_is_rolled_back() -> None:
             self.discarded.append(attachment_id)
 
     runtime = PartialRuntime()
-    response = _pull(_plug_client(runtime, FakePlug(FILES)))
+    response = _pull(_plug_client(runtime, FakePlug()))
     assert response.status_code == 422
     assert "UNSUPPORTED_FORMAT" in response.json()["detail"]
     assert runtime.discarded == ["attachment-" + "0" * 32]
@@ -353,7 +727,7 @@ def test_plug_on_refuses_plain_upload_before_reading_the_body() -> None:
     import asyncio
 
     runtime = FakeRuntime()
-    app = _plug_client(runtime, FakePlug(FILES)).app
+    app = _plug_client(runtime, FakePlug()).app
     scope = {
         "type": "http", "method": "POST", "path": f"/api/threads/{THREAD_ID}/attachments",
         "raw_path": f"/api/threads/{THREAD_ID}/attachments".encode(), "query_string": b"",
@@ -420,8 +794,22 @@ def test_plug_pull_logs_no_handle_secret_or_thread(caplog) -> None:
     import logging
 
     caplog.set_level(logging.DEBUG)
-    response = _pull(_plug_client(FakeRuntime(), FakePlug(FILES)))
+    response = _pull(_plug_client(FakeRuntime(), FakePlug()))
     assert response.status_code == 200
     text = caplog.text + json.dumps(response.json())
     assert SECRET not in text
     assert HANDLE not in caplog.text
+    # Nothing from the archive is logged: no member paths, contents or hashes.
+    assert "dataset/" not in caplog.text
+    assert "S001" not in caplog.text
+    assert hashlib.sha256(DATASET).hexdigest() not in caplog.text
+
+
+def test_plug_refusal_logs_no_archive_detail(caplog) -> None:
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    archive = _patch_first_entry(_stored_one(), 14, 16, b"\x00\x00\x00\x00")
+    _archive_refusal(archive, ONE)
+    assert "dataset_1" not in caplog.text
+    assert "CRC" not in caplog.text

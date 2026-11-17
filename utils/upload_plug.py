@@ -3,28 +3,30 @@
 When ``REPORT_AGENT_UPLOAD_PLUG_URL`` is empty (the default) nothing changes.
 When it is set, the browser hands a chosen ZIP to the plug's page (shown in a
 modal), the plug prepares the files, and the browser gets back only an opaque
-handle. This module then pulls the prepared files from the plug, server to
-server, with a shared secret, and returns them in the same shape the plain
-upload route stages.
+handle. This module then pulls the prepared study ZIP from the plug, server to
+server, with a shared secret, unzips it in memory and returns its files in the
+same shape the plain upload route stages.
 
-The app does not look inside the prepared files beyond checking their size,
-hash and type; what the plug does to them is the plug's business. The only
-visible change with a plug set is the paperclip accepting a ZIP only.
+The app does not look inside the prepared files beyond checking the archive,
+their size, hash and type; what the plug does to them is the plug's business.
+Nothing pulled from the plug is written to disk or logged here.
 """
 
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
 import re
+import zipfile
 from dataclasses import dataclass, field
 from urllib.parse import quote, urlsplit
 
 import httpx
 
-CONTRACT_VERSION = "1"
+CONTRACT_VERSION = "2"
 
 PLUG_URL_ENV = "REPORT_AGENT_UPLOAD_PLUG_URL"
 PLUG_SECRET_ENV = "REPORT_AGENT_UPLOAD_PLUG_SECRET"
@@ -32,6 +34,24 @@ PLUG_TIMEOUT_ENV = "REPORT_AGENT_UPLOAD_PLUG_TIMEOUT_SECONDS"
 
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MEMBER_PATH_RE = re.compile(
+    r"^(dataset|dictionary|forms|metadata)/(dataset|dictionary|form|metadata)_[1-9][0-9]{0,3}"
+    r"\.(csv|tsv|xlsx|txt|md|json|xml|docx)$"
+)
+# Each folder holds one role only: dataset/dataset_1.csv, forms/form_1.json.
+_FOLDER_ROLES = {
+    "dataset": "dataset",
+    "dictionary": "dictionary",
+    "forms": "form",
+    "metadata": "metadata",
+}
+# Upper bound on the plug's ZIP (each entry stored or deflated no larger than its file;
+# no extra fields, comments, data descriptors or ZIP64 records): the files, the end
+# record, and per entry a local header (30) and a central entry (46) that each hold the path.
+_ZIP_END_RECORD_BYTES = 22
+_ZIP_ENTRY_BYTES = 30 + 46
+_ZIP_METHODS = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+_ZIP_ENCRYPTED_FLAG = 0x1
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 _MIN_SECRET_CHARS = 32
 _MAX_MANIFEST_BYTES = 64 * 1024
@@ -131,6 +151,24 @@ def _safe_member_name(name: object) -> str:
     return name
 
 
+def _member_basename(path: object) -> str:
+    """Check a manifest path and return the file name the app stages it under."""
+    if not isinstance(path, str) or not _MEMBER_PATH_RE.fullmatch(path):
+        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid file path")
+    folder, name = path.split("/", 1)
+    if name.rsplit("_", 1)[0] != _FOLDER_ROLES[folder]:
+        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid file path")
+    return _safe_member_name(name)
+
+
+def _unique_names(names: list[str]) -> None:
+    seen: set[str] = set()
+    for name in names:
+        if name.lower() in seen:
+            raise UploadPlugError("PLUG_REJECTED", "the upload plug returned duplicate file names")
+        seen.add(name.lower())
+
+
 def fetch_delivery(
     settings: UploadPlugSettings,
     handle: str,
@@ -140,11 +178,12 @@ def fetch_delivery(
     max_file_bytes: int,
     max_total_bytes: int,
 ) -> list[tuple[str, str, bytes]]:
-    """Pull the prepared files for ``handle`` and verify them.
+    """Pull the prepared study ZIP for ``handle``, verify it and unzip it in memory.
 
     Returns ``(filename, mime, content)`` tuples, the same shape the plain
-    upload route passes to staging. Raises ``UploadPlugError`` on any problem;
-    nothing is returned unless every file passed every check.
+    upload route passes to staging; ``filename`` is the member's base name.
+    Raises ``UploadPlugError`` on any problem; nothing is returned unless the
+    archive and every file in it passed every check.
     """
     if not settings.enabled:
         raise UploadPlugError("PLUG_UNREACHABLE", "no upload plug is configured")
@@ -163,18 +202,20 @@ def fetch_delivery(
             trust_env=False,
         ) as client:
             manifest = _get_manifest(client, base, headers, params)
-            files = _check_manifest(
+            # Every check on the manifest runs before the archive is fetched, so an
+            # over-cap or malformed delivery is refused without spending it.
+            archive_size, archive_digest, members = _check_manifest(
                 manifest,
                 max_files=max_files,
                 max_file_bytes=max_file_bytes,
                 max_total_bytes=max_total_bytes,
             )
-            return [
-                (name, mime, _get_file(client, f"{base}/files/{index}", headers, params, size, digest))
-                for index, (name, mime, size, digest) in enumerate(files)
-            ]
+            archive = _get_archive(
+                client, f"{base}/archive", headers, params, archive_size, archive_digest
+            )
     except httpx.HTTPError as exc:
         raise UploadPlugError("PLUG_UNREACHABLE", "the upload plug could not be reached") from exc
+    return _unzip_members(archive, members)
 
 
 def _raise_for_status(response: httpx.Response) -> None:
@@ -207,22 +248,24 @@ def _check_manifest(
     max_files: int,
     max_file_bytes: int,
     max_total_bytes: int,
-) -> list[tuple[str, str, int, str]]:
-    entries = manifest.get("files")
+) -> tuple[int, str, list[tuple[str, str, str, int, str]]]:
+    """Return the archive size and hash and ``(path, name, mime, size, sha256)`` per member."""
+    entries = manifest.get("members")
     if not isinstance(entries, list) or not entries:
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned no files")
     if len(entries) > max_files:
         raise UploadPlugError("TOO_MANY_FILES", "the prepared upload exceeds the attachment count limit")
-    checked: list[tuple[str, str, int, str]] = []
-    seen: set[str] = set()
+    checked: list[tuple[str, str, str, int, str]] = []
+    paths: set[str] = set()
     total = 0
     for entry in entries:
         if not isinstance(entry, dict):
             raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid manifest")
-        name = _safe_member_name(entry.get("name"))
-        if name.lower() in seen:
-            raise UploadPlugError("PLUG_REJECTED", "the upload plug returned duplicate file names")
-        seen.add(name.lower())
+        path = entry.get("path")
+        name = _member_basename(path)
+        if path in paths:
+            raise UploadPlugError("PLUG_REJECTED", "the upload plug returned duplicate file paths")
+        paths.add(path)
         size = entry.get("size")
         digest = entry.get("sha256")
         mime = entry.get("mime", "")
@@ -240,11 +283,27 @@ def _check_manifest(
                 "MESSAGE_ATTACHMENTS_TOO_LARGE",
                 "the prepared upload exceeds the total attachment size limit",
             )
-        checked.append((name, mime, size, digest))
-    return checked
+        checked.append((path, name, mime, size, digest))
+    _unique_names([name for _path, name, _mime, _size, _digest in checked])
+
+    archive = manifest.get("archive")
+    if not isinstance(archive, dict):
+        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid manifest")
+    archive_size = archive.get("size")
+    archive_digest = archive.get("sha256")
+    if isinstance(archive_size, bool) or not isinstance(archive_size, int) or archive_size < 0:
+        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid archive size")
+    if not isinstance(archive_digest, str) or not _SHA256_RE.fullmatch(archive_digest):
+        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid checksum")
+    bound = total + _ZIP_END_RECORD_BYTES + sum(
+        _ZIP_ENTRY_BYTES + 2 * len(path) for path, _name, _mime, _size, _digest in checked
+    )
+    if archive_size > bound:
+        raise UploadPlugError("PLUG_REJECTED", "the prepared archive is larger than its files allow")
+    return archive_size, archive_digest, checked
 
 
-def _get_file(
+def _get_archive(
     client: httpx.Client,
     url: str,
     headers: dict,
@@ -256,8 +315,66 @@ def _get_file(
         _raise_for_status(response)
         content = _read_capped(response, size)
     if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
-        raise UploadPlugError("PLUG_REJECTED", "a prepared file did not match its checksum")
+        raise UploadPlugError("PLUG_REJECTED", "the prepared archive did not match its checksum")
     return content
+
+
+def _unzip_members(
+    archive: bytes,
+    members: list[tuple[str, str, str, int, str]],
+) -> list[tuple[str, str, bytes]]:
+    """Unzip in memory, all or nothing: the entries must be exactly the manifest's files."""
+    try:
+        return _read_members(archive, members)
+    except UploadPlugError:
+        raise
+    except Exception:
+        # zipfile, zlib and struct messages carry entry names: never pass them on.
+        raise UploadPlugError(
+            "PLUG_REJECTED", "the prepared archive could not be read safely"
+        ) from None
+
+
+def _read_members(
+    archive: bytes,
+    members: list[tuple[str, str, str, int, str]],
+) -> list[tuple[str, str, bytes]]:
+    mismatch = UploadPlugError("PLUG_REJECTED", "the prepared archive does not match its manifest")
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        # Every entry is checked before any is read. infolist() keeps duplicates, and
+        # orig_filename is the name as stored (filename is cut at a NUL byte).
+        entries = bundle.infolist()
+        for entry in entries:
+            name = entry.orig_filename
+            if (
+                entry.filename != name
+                or entry.is_dir()
+                or name.startswith("/")
+                or "\\" in name
+                or ".." in name.split("/")
+            ):
+                raise mismatch
+            if entry.flag_bits & _ZIP_ENCRYPTED_FLAG:
+                raise UploadPlugError("PLUG_REJECTED", "the prepared archive holds an encrypted file")
+            if entry.compress_type not in _ZIP_METHODS:
+                raise UploadPlugError(
+                    "PLUG_REJECTED", "the prepared archive uses an unsupported compression method"
+                )
+        names = [entry.orig_filename for entry in entries]
+        if len(names) != len(members) or set(names) != {path for path, *_rest in members}:
+            raise mismatch
+        by_path = {entry.orig_filename: entry for entry in entries}
+        for path, _name, _mime, size, _digest in members:
+            if by_path[path].file_size != size:
+                raise mismatch
+        files: list[tuple[str, str, bytes]] = []
+        for path, name, mime, size, digest in members:
+            with bundle.open(by_path[path]) as handle:
+                content = handle.read(size + 1)
+            if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
+                raise UploadPlugError("PLUG_REJECTED", "a prepared file did not match its checksum")
+            files.append((name, mime, content))
+    return files
 
 
 def _read_capped(response: httpx.Response, cap: int) -> bytes:
