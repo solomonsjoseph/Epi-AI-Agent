@@ -325,3 +325,85 @@ def test_no_request_model_accepts_the_flag() -> None:
         server.PlugAttachmentRequest.model_validate({"handle": "h" * 32, "deidentified": True})
     with pytest.raises(ValidationError):
         schemas.SubmitMessageRequest.model_validate({"text": "hi", "deidentified": True})
+
+
+# --- Model context -------------------------------------------------------------
+
+# Pinned here on purpose: a change to the sentence must change this test too.
+PINNED_SENTENCE = (
+    "Attachments marked deidentified were de-identified by the upload checker, "
+    "which can miss some identifiers. Bracketed tokens such as [NAME] or [DATE] "
+    "are placeholders for removed values: treat them as removed, not as missing "
+    "or corrupt data, and do not try to reconstruct them. Date columns may hold "
+    "day offsets from each participant's first date instead of calendar dates, "
+    "and ID columns hold study IDs."
+)
+
+
+def _prompt_cards(prompt: str) -> list[dict]:
+    artifact_context = prompt.split("\n\n", 1)[0]
+    return json.loads(artifact_context.split(":\n", 1)[1])
+
+
+def test_deidentified_sentence_is_the_pinned_constant() -> None:
+    from epi_agent.agent import DEIDENTIFIED_ATTACHMENTS_NOTE
+
+    assert DEIDENTIFIED_ATTACHMENTS_NOTE == PINNED_SENTENCE
+
+
+def test_context_prompt_marks_flagged_cards_and_adds_the_sentence_once(tmp_path) -> None:
+    from epi_agent.agent import build_epi_agent_context_prompt
+
+    payload, flagged_id, plain_id = _bound_state(tmp_path)
+    prompt = build_epi_agent_context_prompt(payload)
+    cards = {card["id"]: card for card in _prompt_cards(prompt)}
+    assert cards[flagged_id]["deidentified"] is True
+    assert "deidentified" not in cards[plain_id]
+    assert prompt.count(PINNED_SENTENCE) == 1
+    assert prompt.split("\n\n")[1] == PINNED_SENTENCE
+
+
+def test_context_prompt_without_flagged_files_is_unchanged(tmp_path) -> None:
+    from epi_agent.agent import build_epi_agent_context_prompt
+
+    payload, flagged_id, _plain_id = _bound_state(tmp_path)
+    payload["artifacts"]["attachments"][flagged_id].pop("deidentified")
+    prompt = build_epi_agent_context_prompt(payload)
+    assert "deidentified" not in prompt
+    assert PINNED_SENTENCE not in prompt
+    assert len(_prompt_cards(prompt)) == 2
+
+
+def test_context_prompt_never_flags_a_dataset_derived_from_a_flagged_file() -> None:
+    from epi_agent.agent import build_epi_agent_context_prompt
+
+    upload_id = "attachment-" + "a" * 32
+    state = {
+        "authorized_attachment_ids": [upload_id],
+        "artifacts": {
+            "attachments": {
+                upload_id: {
+                    "id": upload_id,
+                    "kind": "tabular",
+                    "status": "available",
+                    "filename": "dataset_1.csv",
+                    "deidentified": True,
+                }
+            },
+            "datasets": {
+                "uploaded-000000000001": {
+                    "kind": "uploaded",
+                    "status": "active",
+                    "columns": ["id", "year"],
+                    "provenance": {
+                        "source": "message_attachment",
+                        "source_attachment_ids": [upload_id],
+                    },
+                    "deidentified": True,
+                }
+            },
+        },
+    }
+    cards = {card["id"]: card for card in _prompt_cards(build_epi_agent_context_prompt(state))}
+    assert cards[upload_id]["deidentified"] is True
+    assert "deidentified" not in cards["uploaded-000000000001"]
