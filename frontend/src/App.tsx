@@ -740,6 +740,7 @@ export default function App({
         byte_size: attachment.byte_size,
         relationship: "input",
         origin_message_id: optimisticMessageId,
+        deidentified: attachment.deidentified,
       })),
     };
     setIsSubmitting(true);

@@ -140,6 +140,8 @@ export interface ConversationAttachment {
   byte_size: number | null;
   relationship: "input" | "used" | "output";
   origin_message_id: string | null;
+  // Set by the server only for files pulled through the upload checker.
+  deidentified?: boolean;
 }
 
 export interface ClarificationExchange {
@@ -156,6 +158,7 @@ export interface AttachmentManifestSummary {
   mime: string;
   byte_size: number;
   status: "staged" | "available";
+  deidentified?: boolean;
 }
 
 export interface AttachmentUploadError {

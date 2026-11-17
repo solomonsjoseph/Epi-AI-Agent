@@ -2227,3 +2227,11 @@ select {
   font-weight: 600;
   white-space: nowrap;
 }
+
+/* The chip and card style their direct spans; keep the badge looking like the one above. */
+.attachment-composer-chip > .deidentified-badge,
+.message-attachment-card > .deidentified-badge {
+  justify-self: start;
+  color: #b45309;
+  font-size: 12px;
+}

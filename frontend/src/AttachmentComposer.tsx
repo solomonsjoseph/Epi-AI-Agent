@@ -89,6 +89,14 @@ export default function AttachmentComposer({
                 {attachment.kind} · {formatBytes(attachment.byte_size)} ·{" "}
                 {attachment.status}
               </span>
+              {attachment.deidentified ? (
+                <span
+                  className="upload-checker-badge deidentified-badge"
+                  title="De-identified by the upload checker, which can miss some identifiers."
+                >
+                  De-identified
+                </span>
+              ) : null}
               <button
                 aria-label={`Remove ${attachment.filename}`}
                 disabled={disabled}

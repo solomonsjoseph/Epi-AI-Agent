@@ -322,6 +322,14 @@ export default function MessageAttachment({
           .filter(Boolean)
           .join(" · ")}
       </span>
+      {attachment.deidentified ? (
+        <span
+          className="upload-checker-badge deidentified-badge"
+          title="De-identified by the upload checker, which can miss some identifiers."
+        >
+          De-identified
+        </span>
+      ) : null}
       <div className="message-attachment-actions">
         <AuthenticatedArtifact
           alt={isDataset ? "Download dataset" : `Download ${name}`}
