@@ -48,6 +48,17 @@ _FOLDER_ROLES = {
 # Upper bound on the plug's ZIP (each entry stored or deflated no larger than its file;
 # no extra fields, comments, data descriptors or ZIP64 records): the files, the end
 # record, and per entry a local header (30) and a central entry (46) that each hold the path.
+# The media type the checker writes for each member extension; anything else is refused.
+_MEMBER_MIME = {
+    "csv": "text/csv",
+    "tsv": "text/tab-separated-values",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "txt": "text/plain",
+    "md": "text/markdown",
+    "json": "application/json",
+    "xml": "application/xml",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
 _ZIP_END_RECORD_BYTES = 22
 _ZIP_ENTRY_BYTES = 30 + 46
 _ZIP_METHODS = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
@@ -192,6 +203,8 @@ def fetch_delivery(
     headers = {
         "Authorization": f"Bearer {settings.secret}",
         "X-Gate-Contract": CONTRACT_VERSION,
+        # No compressed transfer: the read caps below count the bytes as sent.
+        "Accept-Encoding": "identity",
     }
     params = {"thread_id": thread_id}
     try:
@@ -214,7 +227,7 @@ def fetch_delivery(
                 client, f"{base}/archive", headers, params, archive_size, archive_digest
             )
     except httpx.HTTPError as exc:
-        raise UploadPlugError("PLUG_UNREACHABLE", "the upload plug could not be reached") from exc
+        raise UploadPlugError("PLUG_UNREACHABLE", "the upload plug could not be reached") from None
     return _unzip_members(archive, members)
 
 
@@ -236,9 +249,11 @@ def _get_manifest(client: httpx.Client, url: str, headers: dict, params: dict) -
     try:
         manifest = json.loads(body)
     except ValueError as exc:
-        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an unreadable manifest") from exc
+        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an unreadable manifest") from None
     if not isinstance(manifest, dict) or manifest.get("contract") != CONTRACT_VERSION:
         raise UploadPlugError("CONTRACT_MISMATCH", "the upload plug uses a different contract version")
+    if set(manifest) != {"contract", "archive", "members"}:
+        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid manifest")
     return manifest
 
 
@@ -259,7 +274,7 @@ def _check_manifest(
     paths: set[str] = set()
     total = 0
     for entry in entries:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or set(entry) != {"path", "mime", "size", "sha256"}:
             raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid manifest")
         path = entry.get("path")
         name = _member_basename(path)
@@ -273,7 +288,7 @@ def _check_manifest(
             raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid file size")
         if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
             raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid checksum")
-        if not isinstance(mime, str) or len(mime) > 255:
+        if mime != _MEMBER_MIME.get(name.rsplit(".", 1)[-1]):
             raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid media type")
         if size > max_file_bytes:
             raise UploadPlugError("FILE_TOO_LARGE", "a prepared file exceeds the attachment size limit")
@@ -287,7 +302,7 @@ def _check_manifest(
     _unique_names([name for _path, name, _mime, _size, _digest in checked])
 
     archive = manifest.get("archive")
-    if not isinstance(archive, dict):
+    if not isinstance(archive, dict) or set(archive) != {"size", "sha256"}:
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid manifest")
     archive_size = archive.get("size")
     archive_digest = archive.get("sha256")
@@ -378,6 +393,8 @@ def _read_members(
 
 
 def _read_capped(response: httpx.Response, cap: int) -> bytes:
+    if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+        raise UploadPlugError("PLUG_REJECTED", "the upload plug sent an encoded response")
     content = bytearray()
     for chunk in response.iter_bytes(_READ_CHUNK_BYTES):
         content.extend(chunk)

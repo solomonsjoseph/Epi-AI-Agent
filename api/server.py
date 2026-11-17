@@ -499,8 +499,8 @@ def create_app(
         except AttachmentError as exc:
             raise HTTPException(
                 status_code=422,
-                detail=f"PLUG_REJECTED: {exc}",
-            ) from exc
+                detail=f"PLUG_REJECTED: the app could not stage the prepared files ({exc.code})",
+            ) from None
         if result.errors:
             # All or nothing: never leave part of a prepared upload staged.
             for attachment in result.attachments:

@@ -50,9 +50,9 @@ def test_store_writes_the_flag_to_the_manifest(tmp_path) -> None:
     flagged = store.stage(THREAD_ID, "dataset_1.csv", "text/csv", CSV, deidentified=True)
     plain = store.stage(THREAD_ID, "study.csv", "text/csv", CSV)
     assert flagged["deidentified"] is True
-    assert plain["deidentified"] is False
+    assert "deidentified" not in plain  # plain uploads keep their manifest shape
     assert _on_disk(store, THREAD_ID, flagged["id"])["deidentified"] is True
-    assert _on_disk(store, THREAD_ID, plain["id"])["deidentified"] is False
+    assert "deidentified" not in _on_disk(store, THREAD_ID, plain["id"])  # only plug files carry the key
 
 
 def test_store_flag_is_keyword_only(tmp_path) -> None:
@@ -86,7 +86,7 @@ def test_runtime_stage_attachments_passes_the_flag(tmp_path) -> None:
     assert [a.deidentified for a in plain.attachments] == [False]
     scope = runtime._attachment_scope(THREAD_ID, THREAD_ID)
     assert runtime.attachment_store.require(scope, flagged.attachments[0].id)["deidentified"] is True
-    assert runtime.attachment_store.require(scope, plain.attachments[0].id)["deidentified"] is False
+    assert "deidentified" not in runtime.attachment_store.require(scope, plain.attachments[0].id)  # only plug files carry the key
 
 
 def _bound_state(tmp_path) -> tuple[dict, str, str]:
@@ -104,7 +104,7 @@ def _bound_state(tmp_path) -> tuple[dict, str, str]:
         manifests=[flagged, plain],
     )
     assert store.require(scope, flagged["id"])["deidentified"] is True
-    assert store.require(scope, plain["id"])["deidentified"] is False
+    assert "deidentified" not in store.require(scope, plain["id"])  # only plug files carry the key
     return payload, flagged["id"], plain["id"]
 
 
@@ -113,7 +113,7 @@ def test_message_binding_keeps_the_flag_in_thread_state(tmp_path) -> None:
     attachments = payload["artifacts"]["attachments"]
     assert attachments[flagged_id]["status"] == "available"
     assert attachments[flagged_id]["deidentified"] is True
-    assert attachments[plain_id]["deidentified"] is False
+    assert "deidentified" not in attachments[plain_id]  # only plug files carry the key
 
 
 def test_message_history_and_api_carry_the_flag(tmp_path) -> None:
@@ -251,8 +251,8 @@ def test_message_attachments_take_only_a_true_flag() -> None:
 
 def test_manifest_card_carries_only_a_true_flag() -> None:
     assert _manifest_card({"deidentified": True})["deidentified"] is True
-    assert _manifest_card({"deidentified": "true"})["deidentified"] is False
-    assert _manifest_card({})["deidentified"] is False
+    assert "deidentified" not in _manifest_card({"deidentified": "true"})  # only plug files carry the key
+    assert "deidentified" not in _manifest_card({})  # only plug files carry the key
 
 
 def test_inspect_cards_carry_the_flag(tmp_path) -> None:
@@ -265,7 +265,7 @@ def test_inspect_cards_carry_the_flag(tmp_path) -> None:
     cards = AttachmentReaderService(store, tmp_path).inspect(
         THREAD_ID, [table["id"], form["id"], plain["id"]]
     )
-    assert [card["deidentified"] for card in cards] == [True, True, False]
+    assert [card.get("deidentified") for card in cards] == [True, True, None]
     assert cards[0]["columns"] == ["id", "year"]
 
 
@@ -279,8 +279,8 @@ def test_record_cards_for_derived_artifacts_are_never_flagged(tmp_path) -> None:
             "files": {"file-1": {"kind": "text", "mime": "text/plain", "deidentified": True}},
         },
     )
-    assert reader._available_manifest(THREAD_ID, "uploaded-000000000001")["deidentified"] is False
-    assert reader._available_manifest(THREAD_ID, "file-1")["deidentified"] is False
+    assert "deidentified" not in reader._available_manifest(THREAD_ID, "uploaded-000000000001")  # only plug files carry the key
+    assert "deidentified" not in reader._available_manifest(THREAD_ID, "file-1")  # only plug files carry the key
 
 
 # --- Schemas: response models default to unflagged; request models refuse it ------
@@ -512,4 +512,4 @@ def test_plain_route_stages_unflagged_files_in_the_real_store(tmp_path) -> None:
     attachment = response.json()["attachments"][0]
     assert attachment["deidentified"] is False
     scope = runtime._attachment_scope(THREAD_ID, THREAD_ID)
-    assert _on_disk(runtime.attachment_store, scope, attachment["id"])["deidentified"] is False
+    assert "deidentified" not in _on_disk(runtime.attachment_store, scope, attachment["id"])  # only plug files carry the key

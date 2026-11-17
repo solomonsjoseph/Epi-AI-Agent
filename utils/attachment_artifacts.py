@@ -443,7 +443,6 @@ class LocalAttachmentStore:
             "id": attachment_id,
             "thread_id": thread_id,
             "origin": "uploaded",
-            "deidentified": deidentified is True,
             "kind": detected["kind"],
             "format": detected["format"],
             "filename": filename,
@@ -455,6 +454,10 @@ class LocalAttachmentStore:
             "status": "staged",
             "created_at": datetime.now(UTC).isoformat(),
         }
+        if deidentified is True:
+            # Only files pulled through the upload plug carry the key; plain uploads keep
+            # their manifest shape unchanged.
+            manifest["deidentified"] = True
         if isinstance(scope, ThreadStorageScope):
             manifest["owner_user_id"] = scope.owner_user_id
         self._atomic_write(content_path, content)

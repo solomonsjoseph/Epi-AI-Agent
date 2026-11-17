@@ -861,3 +861,59 @@ def test_plug_refusal_logs_no_archive_detail(caplog) -> None:
     _archive_refusal(archive, ONE)
     assert "dataset_1" not in caplog.text
     assert "CRC" not in caplog.text
+
+
+# Review follow-ups: fixed manifest keys, fixed media types, the shared size bound, no
+# compressed transfer.
+
+
+def test_plug_size_bound_matches_the_checker_formula() -> None:
+    # The same example is pinned in the gate's tests: one 100-byte member at
+    # dataset/dataset_1.csv (21 characters) gives 100 + 22 + 76 + 42 = 240.
+    assert _size_bound([("dataset/dataset_1.csv", "text/csv", b"x" * 100)]) == 240
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param(lambda m: m.update(names=["visits.csv"]), id="manifest-extra"),
+        pytest.param(lambda m: m["archive"].update(name="study.zip"), id="archive-extra"),
+        pytest.param(lambda m: m["members"][0].update(original="visits.csv"), id="member-extra"),
+        pytest.param(lambda m: m["members"][0].pop("mime"), id="member-missing-mime"),
+    ],
+)
+def test_plug_manifest_with_unexpected_fields_is_refused_before_fetch(change) -> None:
+    manifest = _manifest()
+    change(manifest)
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug).startswith("PLUG_REJECTED")
+    assert not plug.archive_requested
+
+
+@pytest.mark.parametrize("mime", ["text/plain", "application/octet-stream", "text/csv\n", ""])
+def test_plug_media_type_must_be_the_one_written_for_the_extension(mime) -> None:
+    manifest = _manifest()
+    manifest["members"][0]["mime"] = mime
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug) == "PLUG_REJECTED: the upload plug returned an invalid media type"
+    assert not plug.archive_requested
+
+
+def test_plug_asks_for_no_compressed_transfer_and_refuses_one() -> None:
+    plug = FakePlug()
+    runtime = FakeRuntime()
+    assert _pull(_plug_client(runtime, plug)).status_code == 200
+    assert all(r.headers.get("accept-encoding") == "identity" for r in plug.requests)
+
+    class GzipPlug(FakePlug):
+        def __call__(self, request):
+            response = super().__call__(request)
+            if request.url.path.endswith("/archive"):
+                import gzip
+
+                return httpx.Response(
+                    200, content=gzip.compress(self.archive), headers={"Content-Encoding": "gzip"}
+                )
+            return response
+
+    assert _refused(GzipPlug()) == "PLUG_REJECTED: the upload plug sent an encoded response"
