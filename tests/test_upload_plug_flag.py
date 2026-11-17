@@ -485,6 +485,12 @@ def test_plug_route_stages_flagged_files_in_the_real_store(tmp_path) -> None:
     scope = runtime._attachment_scope(THREAD_ID, THREAD_ID)
     for attachment in attachments:
         assert _on_disk(runtime.attachment_store, scope, attachment["id"])["deidentified"] is True
+    # Canary: the archive itself never reaches the app's storage, only the staged files.
+    for stored in tmp_path.rglob("*"):
+        if stored.is_file():
+            data = stored.read_bytes()
+            assert not data.startswith(b"PK\x03\x04"), stored
+            assert b"dataset/dataset_1.csv" not in data, stored
 
 
 def test_plain_route_stages_unflagged_files_in_the_real_store(tmp_path) -> None:
