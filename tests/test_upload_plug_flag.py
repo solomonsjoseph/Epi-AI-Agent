@@ -407,3 +407,103 @@ def test_context_prompt_never_flags_a_dataset_derived_from_a_flagged_file() -> N
     cards = {card["id"]: card for card in _prompt_cards(build_epi_agent_context_prompt(state))}
     assert cards[upload_id]["deidentified"] is True
     assert "deidentified" not in cards["uploaded-000000000001"]
+
+
+# --- End to end through the routes, with the real store ------------------------
+
+
+def _route_runtime(tmp_path) -> ReportAgentApiRuntime:
+    runtime = _runtime(tmp_path)
+    runtime.authorize_thread = lambda *args, **kwargs: None
+    return runtime
+
+
+def _plug_settings(members: list[tuple[str, str, bytes]]):
+    import hashlib
+    import io
+    import zipfile
+
+    import httpx
+
+    from utils.upload_plug import UploadPlugSettings
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        for path, _mime, content in members:
+            info = zipfile.ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            bundle.writestr(info, content)
+    archive = buffer.getvalue()
+    manifest = {
+        "contract": "2",
+        "archive": {"size": len(archive), "sha256": hashlib.sha256(archive).hexdigest()},
+        "members": [
+            {
+                "path": path,
+                "mime": mime,
+                "size": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+            for path, mime, content in members
+        ],
+    }
+    handle = "h" * 32
+
+    def plug(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/v1/deliveries/{handle}":
+            return httpx.Response(200, content=json.dumps(manifest).encode())
+        if request.url.path == f"/v1/deliveries/{handle}/archive":
+            return httpx.Response(200, content=archive)
+        return httpx.Response(404)
+
+    settings = UploadPlugSettings(
+        url="http://127.0.0.1:8090", secret="s" * 40, transport=httpx.MockTransport(plug)
+    )
+    return settings, handle
+
+
+def test_plug_route_stages_flagged_files_in_the_real_store(tmp_path) -> None:
+    from fastapi.testclient import TestClient
+
+    from api.server import create_app
+
+    runtime = _route_runtime(tmp_path)
+    settings, handle = _plug_settings(
+        [
+            ("dataset/dataset_1.csv", "text/csv", CSV),
+            ("forms/form_1.txt", "text/plain", TEXT),
+        ]
+    )
+    client = TestClient(create_app(runtime, provider_api_key="unused", upload_plug=settings))
+    response = client.post(f"/api/threads/{THREAD_ID}/plug-attachments", json={"handle": handle})
+    assert response.status_code == 200, response.text
+    attachments = response.json()["attachments"]
+    assert [(a["filename"], a["deidentified"]) for a in attachments] == [
+        ("dataset_1.csv", True),
+        ("form_1.txt", True),
+    ]
+    scope = runtime._attachment_scope(THREAD_ID, THREAD_ID)
+    for attachment in attachments:
+        assert _on_disk(runtime.attachment_store, scope, attachment["id"])["deidentified"] is True
+
+
+def test_plain_route_stages_unflagged_files_in_the_real_store(tmp_path) -> None:
+    from fastapi.testclient import TestClient
+
+    from api.server import create_app
+    from utils.upload_plug import UploadPlugSettings
+
+    runtime = _route_runtime(tmp_path)
+    client = TestClient(
+        create_app(runtime, provider_api_key="unused", upload_plug=UploadPlugSettings())
+    )
+    response = client.post(
+        f"/api/threads/{THREAD_ID}/attachments",
+        files=[("files", ("study.csv", CSV, "text/csv"))],
+        data={"deidentified": "true"},
+    )
+    assert response.status_code == 200, response.text
+    attachment = response.json()["attachments"][0]
+    assert attachment["deidentified"] is False
+    scope = runtime._attachment_scope(THREAD_ID, THREAD_ID)
+    assert _on_disk(runtime.attachment_store, scope, attachment["id"])["deidentified"] is False
