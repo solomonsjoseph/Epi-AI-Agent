@@ -110,10 +110,12 @@ to the paperclip.
   (`dataset_1.csv`), all or none, through the normal upload checks.
 - Files staged this way show a "De-identified" badge on the composer chip and
   the message card. The model sees a `deidentified` mark on them and one fixed
-  sentence: the upload checker can miss some identifiers, bracketed tokens such
+  sentence: the upload checker can miss some identifiers (names especially), bracketed tokens such
   as `[NAME]` or `[DATE]` stand for removed values, date columns may hold day
   offsets and ID columns hold study IDs. The badge says the files came through
-  the configured plug, not that no protected health information remains.
+  the configured plug, not that no protected health information remains. The
+  app trusts whichever plug holds the shared secret: a plug that does not
+  check would still get its files marked.
   Plain uploads and files the app derives later are never marked.
 
 ### Contract version 2 (pinned)
