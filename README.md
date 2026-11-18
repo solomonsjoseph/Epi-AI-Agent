@@ -108,11 +108,12 @@ to the paperclip.
   memory (the ZIP itself is never written to disk or logged), checks it against
   the plug's manifest and stages each file under its own name
   (`dataset_1.csv`), all or none, through the normal upload checks.
-- Files staged this way show a "De-identified" badge on the composer chip and
+- Files staged this way show a "Passed upload checker" badge on the composer chip and
   the message card. The model sees a `deidentified` mark on them and one fixed
-  sentence: the upload checker can miss some identifiers, bracketed tokens such
-  as `[NAME]` or `[DATE]` stand for removed values, date columns may hold day
-  offsets and ID columns hold study IDs. The badge says the files came through
+  sentence: the upload checker can miss some identifiers (names especially), the
+  model must not repeat, infer from or try to re-identify one that remains,
+  bracketed tokens such as `[NAME]` or `[DATE]` stand for removed values, date
+  columns may hold day offsets and ID columns should hold study IDs. The badge says the files came through
   the configured plug, not that no protected health information remains. The
   app trusts whichever plug holds the shared secret: a plug that does not
   check would still get its files marked.

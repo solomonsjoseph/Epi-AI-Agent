@@ -57,31 +57,31 @@ function renderCard(attachment: ConversationAttachment) {
   );
 }
 
-describe("De-identified badge", () => {
+describe("Passed upload checker badge", () => {
   it("shows on a composer chip for a file from the upload checker", () => {
     renderComposer(staged(true));
-    const badge = screen.getByText("De-identified");
+    const badge = screen.getByText("Passed upload checker");
     expect(badge.className).toContain("upload-checker-badge");
     expect(badge.getAttribute("title")).toContain("can miss some identifiers");
   });
 
   it("does not show on a composer chip for a plain upload", () => {
     renderComposer(staged(false));
-    expect(screen.queryByText("De-identified")).toBeNull();
+    expect(screen.queryByText("Passed upload checker")).toBeNull();
     renderComposer(staged());
-    expect(screen.queryByText("De-identified")).toBeNull();
+    expect(screen.queryByText("Passed upload checker")).toBeNull();
   });
 
   it("shows on the message attachment card for a file from the upload checker", () => {
     renderCard(sent(true));
     expect(screen.getByText("dataset_1.csv")).toBeTruthy();
-    expect(screen.getByText("De-identified").className).toContain("upload-checker-badge");
+    expect(screen.getByText("Passed upload checker").className).toContain("upload-checker-badge");
   });
 
   it("does not show on the message attachment card for a plain upload", () => {
     renderCard(sent(false));
-    expect(screen.queryByText("De-identified")).toBeNull();
+    expect(screen.queryByText("Passed upload checker")).toBeNull();
     renderCard(sent());
-    expect(screen.queryByText("De-identified")).toBeNull();
+    expect(screen.queryByText("Passed upload checker")).toBeNull();
   });
 });

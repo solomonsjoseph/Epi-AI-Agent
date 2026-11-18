@@ -325,9 +325,9 @@ export default function MessageAttachment({
       {attachment.deidentified ? (
         <span
           className="upload-checker-badge deidentified-badge"
-          title="De-identified by the upload checker, which can miss some identifiers."
+          title="Passed the upload checker, which can miss some identifiers, names especially."
         >
-          De-identified
+          Passed upload checker
         </span>
       ) : null}
       <div className="message-attachment-actions">

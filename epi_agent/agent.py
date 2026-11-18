@@ -60,11 +60,12 @@ _MAX_CARD_LIST_ITEMS = 20
 # pulled through the upload plug). Fixed text: nothing in it comes from the data.
 DEIDENTIFIED_ATTACHMENTS_NOTE = (
     "Attachments marked deidentified were de-identified by the upload checker, "
-    "which can miss some identifiers. Bracketed tokens such as [NAME] or [DATE] "
-    "are placeholders for removed values: treat them as removed, not as missing "
-    "or corrupt data, and do not try to reconstruct them. Date columns may hold "
-    "day offsets from each participant's first date instead of calendar dates, "
-    "and ID columns hold study IDs."
+    "which can miss some identifiers, names especially. If an identifier remains, "
+    "do not repeat it, infer from it or try to re-identify anyone. Bracketed "
+    "tokens such as [NAME] or [DATE] are placeholders for removed values: treat "
+    "them as removed, not as missing or corrupt data, and do not try to "
+    "reconstruct them. Date columns may hold day offsets from each participant's "
+    "first date instead of calendar dates, and ID columns should hold study IDs."
 )
 
 

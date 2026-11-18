@@ -92,9 +92,9 @@ export default function AttachmentComposer({
               {attachment.deidentified ? (
                 <span
                   className="upload-checker-badge deidentified-badge"
-                  title="De-identified by the upload checker, which can miss some identifiers."
+                  title="Passed the upload checker, which can miss some identifiers, names especially."
                 >
-                  De-identified
+                  Passed upload checker
                 </span>
               ) : null}
               <button
