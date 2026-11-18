@@ -2373,6 +2373,8 @@ class ReportAgentApiRuntime:
         identity: RequestIdentity | str,
         thread_id: str | list[tuple[str, str, bytes]],
         uploads: list[tuple[str, str, bytes]] | None = None,
+        *,
+        deidentified: bool = False,
     ) -> AttachmentUploadResult:
         if isinstance(identity, RequestIdentity):
             assert isinstance(thread_id, str)
@@ -2403,6 +2405,7 @@ class ReportAgentApiRuntime:
                     filename,
                     mime,
                     content,
+                    deidentified=deidentified,
                 )
             except AttachmentError as exc:
                 errors.append(
@@ -3190,6 +3193,7 @@ def _message_attachments(message: Any) -> list[ConversationAttachment]:
                 mime=str(attachment.get("mime") or ""),
                 byte_size=attachment.get("byte_size"),
                 relationship=relationship,
+                deidentified=attachment.get("deidentified") is True,
                 origin_message_id=(
                     str(attachment["origin_message_id"])
                     if attachment.get("origin_message_id")
