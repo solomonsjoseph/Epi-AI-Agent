@@ -110,7 +110,7 @@ to the paperclip.
   (`dataset_1.csv`), all or none, through the normal upload checks.
 - Files staged this way show a "De-identified" badge on the composer chip and
   the message card. The model sees a `deidentified` mark on them and one fixed
-  sentence: the upload checker can miss some identifiers (names especially), bracketed tokens such
+  sentence: the upload checker can miss some identifiers, bracketed tokens such
   as `[NAME]` or `[DATE]` stand for removed values, date columns may hold day
   offsets and ID columns hold study IDs. The badge says the files came through
   the configured plug, not that no protected health information remains. The
