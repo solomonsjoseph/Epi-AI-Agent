@@ -118,6 +118,11 @@ to the paperclip.
   protected health information remains. The app trusts whichever plug holds the
   shared secret: a plug that does not check would still get its files marked.
   Plain uploads and files the app derives later are never marked.
+- In the checker's pop-up, a column of repeated values read as names (for
+  example a site or status column) is listed with its row counts. The
+  uploader can Remove it (the default) or Keep it as uploaded, which re-cleans
+  the study and releases those values. This choice is made in the checker,
+  not in this app.
 
 ### Contract version 2 (pinned)
 
