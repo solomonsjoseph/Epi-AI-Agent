@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+import re
 import sqlite3
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -389,20 +390,58 @@ class ConversationTitleGenerator:
             )
         )
 
-    def generate(self, first_message: str) -> str:
+    def generate(self, first_message: str, *, has_attachments: bool = False) -> str:
+        instructions = (
+            "Return only a concise 4-8 word title describing the "
+            "user's analysis intent. Do not answer or carry out the "
+            "request. Do not use quotes, markdown, or a trailing period."
+        )
+        if has_attachments:
+            # Only the fact that files exist is shared, never their names or contents.
+            instructions += (
+                " The user attached data files to this message. You cannot see "
+                "them and do not need to: title the request itself, and never "
+                "say that you cannot see or access the files."
+            )
         response = self._model.invoke(
             [
-                SystemMessage(
-                    content=(
-                        "Return only a concise 4–8 word title describing the "
-                        "user's analysis intent. Do not use quotes, markdown, "
-                        "or a trailing period."
-                    )
-                ),
+                SystemMessage(content=instructions),
                 HumanMessage(content=first_message),
             ]
         )
-        return ConversationHistoryStore._title(coerce_text_content(response.content))
+        title = ConversationHistoryStore._title(coerce_text_content(response.content))
+        if _looks_like_reply(title):
+            return _short_fallback(first_message)
+        return title
+
+
+_MAX_TITLE_WORDS = 10
+# "can't" with a straight or a curly (U+2019) apostrophe.
+# "I ...", "I'm ...", "I'd ..." (straight or curly apostrophe).
+_FIRST_PERSON = re.compile(r"I(?:\s|['\u2019])")
+_REPLY_WORDS = re.compile(r"\b(?:access|cannot|can['\u2019]t)\b", re.IGNORECASE)
+
+
+def _short_fallback(first_message: str) -> str:
+    """The typed message as a title, cut at a word boundary to at most 10 words."""
+    words = ConversationHistoryStore.fallback_title(first_message).split()
+    return " ".join(words[:_MAX_TITLE_WORDS]).rstrip(",;:.")
+
+
+def _looks_like_reply(title: str) -> bool:
+    """True when the title model answered the message instead of titling it.
+
+    A sentence (more than 10 words), a reply in the first person, or a refusal
+    ("I don't have access to the data") would otherwise be stored as the
+    sidebar title. Titles that merely mention access (for example "Access to
+    care by district") also fall back to the user's own message, which is
+    still a usable title.
+    """
+    return (
+        len(title.split()) > _MAX_TITLE_WORDS
+        or _FIRST_PERSON.match(title) is not None
+        or _REPLY_WORDS.search(title) is not None
+    )
 
 
 # Deprecated alias kept for older imports.
