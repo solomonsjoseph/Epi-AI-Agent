@@ -277,8 +277,8 @@ def create_app(
         the attachment store (every upload of the thread), not from the conversation view."""
         try:
             return not runtime.sent_attachments_passed_checker(identity, thread_id)
-        except (AttachmentError, OSError):
-            return True
+        except Exception:
+            return True  # anything unreadable counts as unchecked (fail closed)
 
     def refuse_unchecked_thread(identity: RequestIdentity, thread_id: str) -> None:
         if checker.is_on(identity.owner_user_id) and thread_has_unchecked_inputs(
@@ -441,11 +441,19 @@ def create_app(
         thread_id: str,
         identity: RequestIdentity = Depends(local_request_identity),
     ) -> ApiThreadState:
+        # Reading the state can restart an interrupted run (after a restart, for example).
+        # Without a provider key it only reads: no run over files the checker did not pass.
+        key = (
+            None
+            if checker.is_on(identity.owner_user_id)
+            and thread_has_unchecked_inputs(identity, thread_id)
+            else provider_api_key
+        )
         try:
             return runtime.state(
                 identity,
                 thread_id,
-                provider_api_key=provider_api_key,
+                provider_api_key=key,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Conversation not found") from exc
