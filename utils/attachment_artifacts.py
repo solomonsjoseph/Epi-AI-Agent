@@ -656,6 +656,29 @@ class LocalAttachmentStore:
         except OSError:
             pass
 
+    def manifests(self, scope: ThreadStorageScope | str) -> list[dict[str, Any]]:
+        """Every attachment manifest stored for one thread (the formal and the legacy layout)."""
+        if isinstance(scope, ThreadStorageScope):
+            folders = [scope.attachments]
+            if scope.owner_user_id == "local-user":
+                folders.append(self.root / self._thread_component(scope.thread_id))
+        else:
+            folders = [
+                self.root / self._thread_component(scope),
+                UserStorageLayout(self.runtime_root).thread("local-user", scope).attachments,
+            ]
+        found: list[dict[str, Any]] = []
+        for folder in folders:
+            if not folder.is_dir():
+                continue
+            for path in sorted(folder.glob("*/manifest.json")):
+                try:
+                    found.append(json.loads(path.read_text(encoding="utf-8")))
+                except (OSError, json.JSONDecodeError):
+                    # An unreadable manifest counts as a file that did not pass the checker.
+                    found.append({"id": path.parent.name, "status": "unreadable"})
+        return found
+
     def delete_thread(self, scope: ThreadStorageScope | str) -> None:
         if isinstance(scope, ThreadStorageScope):
             shutil.rmtree(scope.root, ignore_errors=True)

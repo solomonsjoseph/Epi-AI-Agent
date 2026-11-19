@@ -2383,6 +2383,23 @@ class ReportAgentApiRuntime:
             for attachment_id in attachment_ids
         )
 
+    def sent_attachments_passed_checker(
+        self,
+        identity: RequestIdentity,
+        thread_id: str,
+    ) -> bool:
+        """True only if every file of this thread beyond "staged" came through the checker.
+
+        Reads the attachment store, which holds every upload of the thread, so it covers each
+        file a later turn or a resume can hand to the model's tools again."""
+        return all(
+            manifest.get("deidentified") is True
+            for manifest in self.attachment_store.manifests(
+                self._attachment_scope(identity, thread_id)
+            )
+            if manifest.get("status") != "staged"
+        )
+
     def stage_attachments(
         self,
         identity: RequestIdentity | str,

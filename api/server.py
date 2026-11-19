@@ -273,25 +273,11 @@ def create_app(
         """True if any file already sent in this conversation did not come through the checker.
 
         Earlier input files stay readable by the model's tools on every later turn and on a
-        review resume, so while the checker is on such a conversation cannot go on. The flag is
-        read from each stored manifest; a file that cannot be read counts as unchecked."""
+        review resume, so while the checker is on such a conversation cannot go on. Read from
+        the attachment store (every upload of the thread), not from the conversation view."""
         try:
-            state = runtime.state(identity, thread_id)
-        except KeyError:
-            return False  # no conversation yet: nothing was sent
-        ids = sorted(
-            {
-                attachment.id
-                for message in state.conversation
-                for attachment in message.attachments
-                if attachment.relationship == "input"
-            }
-        )
-        if not ids:
-            return False
-        try:
-            return not runtime.attachments_passed_checker(identity, thread_id, ids)
-        except AttachmentError:
+            return not runtime.sent_attachments_passed_checker(identity, thread_id)
+        except (AttachmentError, OSError):
             return True
 
     def refuse_unchecked_thread(identity: RequestIdentity, thread_id: str) -> None:

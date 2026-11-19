@@ -318,21 +318,13 @@ def test_only_checker_files_pass_the_send_check(tmp_path) -> None:
 
 
 def _thread_with_input(runtime, attachment_id: str):
-    from api.schemas import ApiThreadState, ConversationAttachment, ConversationMessage, RunStatus
+    """Marks the file as sent (available), as binding it to a message does."""
+    from api.schemas import ApiThreadState, RunStatus
 
-    state = ApiThreadState(
-        thread_id=THREAD_ID,
-        run=RunStatus(state="idle"),
-        conversation=[
-            ConversationMessage(
-                id="user-1",
-                role="user",
-                text="Earlier question",
-                attachments=[ConversationAttachment(id=attachment_id, relationship="input")],
-            )
-        ],
-    )
-    runtime.state = lambda *args, **kwargs: state
+    scope = runtime._attachment_scope(local_request_identity(), THREAD_ID)
+    runtime.attachment_store.mark_available(scope, attachment_id)
+    # The route answers with the thread state; these tests run no graph.
+    runtime.state = lambda *args, **kwargs: ApiThreadState(thread_id=THREAD_ID, run=RunStatus(state="idle"))
 
 
 def test_text_only_turn_is_refused_when_an_earlier_file_was_unchecked(tmp_path) -> None:
@@ -381,6 +373,35 @@ def test_unchecked_earlier_file_is_fine_while_the_checker_is_off(tmp_path) -> No
     _set(client, False)
     raw_id = _plain(client).json()["attachments"][0]["id"]
     _thread_with_input(runtime, raw_id)
+    sent: list[object] = []
+    runtime.submit_message = lambda *args, **kwargs: sent.append(args)
+    assert _send(client, []).status_code == 200
+    assert len(sent) == 1
+
+
+def test_check_reads_the_store_not_the_conversation_view(tmp_path) -> None:
+    """A sent raw file missing from the conversation view (for example after a cancelled turn)
+    is still found, because the check reads every upload of the thread from the store."""
+    from api.schemas import ApiThreadState, RunStatus
+
+    client, runtime, _handle = _real_client(tmp_path)
+    _set(client, False)
+    raw_id = _plain(client).json()["attachments"][0]["id"]
+    _thread_with_input(runtime, raw_id)
+    runtime.state = lambda *args, **kwargs: ApiThreadState(thread_id=THREAD_ID, run=RunStatus(state="idle"))
+    _set(client, True)
+    runtime.submit_message = lambda *args, **kwargs: None
+    assert _send(client, []).status_code == 409
+
+
+def test_a_staged_but_unsent_raw_file_does_not_block_the_conversation(tmp_path) -> None:
+    client, runtime, _handle = _real_client(tmp_path)
+    _set(client, False)
+    _plain(client)  # staged only, never sent
+    from api.schemas import ApiThreadState, RunStatus
+
+    runtime.state = lambda *args, **kwargs: ApiThreadState(thread_id=THREAD_ID, run=RunStatus(state="idle"))
+    _set(client, True)
     sent: list[object] = []
     runtime.submit_message = lambda *args, **kwargs: sent.append(args)
     assert _send(client, []).status_code == 200
