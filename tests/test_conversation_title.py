@@ -37,6 +37,8 @@ CURLY_CANT = "can" + chr(0x2019) + "t"
         "I don't have access to the data",
         "I don't see any attached file in your message. Could you please:\n\n1. Upload it",
         "I need more information to help you",
+        "I'm unable to view the uploaded files",
+        "I" + chr(0x2019) + "d need the data first",
         "Data you " + CURLY_CANT + " see yet",
         "Cannot read attached dataset",
         "No access to uploaded files",
@@ -64,6 +66,7 @@ def test_refusal_with_only_whitespace_message_uses_attachment_title() -> None:
         ("Mean age in the uploaded cohort", "Mean age in the uploaded cohort"),
         ('"Data quality review."', "Data quality review"),
         ("Incidence by district and visit", "Incidence by district and visit"),
+        ("IgG titres by visit", "IgG titres by visit"),
     ],
 )
 def test_real_titles_are_kept(reply: str, expected: str) -> None:

@@ -417,6 +417,8 @@ class ConversationTitleGenerator:
 
 _MAX_TITLE_WORDS = 10
 # "can't" with a straight or a curly (U+2019) apostrophe.
+# "I ...", "I'm ...", "I'd ..." (straight or curly apostrophe).
+_FIRST_PERSON = re.compile(r"I(?:\s|['\u2019])")
 _REPLY_WORDS = re.compile(r"\b(?:access|cannot|can['\u2019]t)\b", re.IGNORECASE)
 
 
@@ -431,7 +433,7 @@ def _looks_like_reply(title: str) -> bool:
     """
     return (
         len(title.split()) > _MAX_TITLE_WORDS
-        or title.startswith("I ")
+        or _FIRST_PERSON.match(title) is not None
         or _REPLY_WORDS.search(title) is not None
     )
 
