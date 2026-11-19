@@ -2368,6 +2368,19 @@ class ReportAgentApiRuntime:
         assert self.history_store is not None
         return self.history_store.delete(identity.owner_user_id, thread_id)
 
+    def attachments_passed_checker(
+        self,
+        identity: RequestIdentity,
+        thread_id: str,
+        attachment_ids: list[str],
+    ) -> bool:
+        """True only if every attachment was staged through the upload checker."""
+        scope = self._attachment_scope(identity, thread_id)
+        return all(
+            self.attachment_store.require(scope, attachment_id).get("deidentified") is True
+            for attachment_id in attachment_ids
+        )
+
     def stage_attachments(
         self,
         identity: RequestIdentity | str,

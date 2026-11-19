@@ -1,12 +1,12 @@
 {
-  "built_at": "2026-11-19T16:12:31.531854+00:00",
+  "built_at": "2026-11-19T16:21:18.343807+00:00",
   "source_sha256": {
     "frontend/index.html": "89f2b276eb183f4ebfe35982a0cac2d863da771436560c61d977e282ee15b07a",
     "frontend/package-lock.json": "a14f127c2e852575ffd49c7e3c4c5e342da58af5f92b45622f0963064b0ad1d5",
     "frontend/package.json": "8ec81f3994220f49d6db19c6986d837edb48450a6efa69d53da28b113e67b3f8",
     "frontend/src/AgentActivityTimeline.tsx": "bf11e9be781b4074a276b145e6c3e33130e8014cc0aee5442f63f2b7b1c28427",
     "frontend/src/AnalysisResultReview.tsx": "ab396bb240808398d9804fc70d30bb12591d67c2fdea756e29d740d4b56252ba",
-    "frontend/src/App.tsx": "c02bf7b8813b09dfef3a8628f4e2fa116ff3128b61895074f25906da8b91e660",
+    "frontend/src/App.tsx": "391064acb47f0a2ca73f188169a13e8a1c4e6657979f11a5a9c82f44a050d1d6",
     "frontend/src/AppShell.tsx": "08b013bdc959a1da6aa29d3d7d95fa192d48aac342a33d5b024ec790f7479d17",
     "frontend/src/AttachmentComposer.tsx": "b4056f65ebf1f26773c905b672639b358448b019c3db63896df8ab8cd41ba920",
     "frontend/src/AuthenticatedArtifact.tsx": "856cda138dda75661e9a949de6947a77e332650b620368fd1e1f297908a66076",

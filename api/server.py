@@ -130,8 +130,9 @@ class AttachmentRequestBodyLimitMiddleware:
     ) -> None:
         self.app = app
         self.max_bytes = max_bytes
-        # With the checker on, plain uploads are refused before any of the body is read,
-        # so raw file bytes never reach this process (no multipart parsing, no temp files).
+        # With the checker on, plain uploads are refused before the app reads any of the
+        # body (no multipart parsing, no temp files); the server may still have buffered
+        # some bytes from the socket before the 409 is sent.
         # A callable is asked on every request, so a user's switch applies at once.
         self.refuse_uploads = refuse_uploads
 
@@ -264,6 +265,7 @@ def create_app(
     plug = upload_plug if upload_plug is not None else UploadPlugSettings.from_env()
     plug.validate()
     checker = UploadCheckerSwitch(plug.checker_mode)
+    app.state.upload_checker = checker
     if plug.enabled:
         quiet_http_logs()
 
@@ -467,6 +469,15 @@ def create_app(
                 files,
                 runtime.attachment_limits,
             )
+            # Asked again after the read: the user may have turned the checker on meanwhile.
+            if checker.is_on(identity.owner_user_id):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "UPLOAD_PLUG_REQUIRED: uploads go through the upload "
+                        "plug; attach a ZIP with the paperclip"
+                    ),
+                )
             return runtime.stage_attachments(identity, thread_id, uploads)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Conversation not found") from exc
@@ -764,6 +775,22 @@ def create_app(
     ) -> ApiThreadState:
         provider_key = provider_key_for_work(identity, thread_id)
         try:
+            # With the checker on, only files that came through it may be sent: files staged
+            # while it was off (or under an earlier mode) stay unsent until removed.
+            if (
+                request.attachment_ids
+                and checker.is_on(identity.owner_user_id)
+                and not runtime.attachments_passed_checker(
+                    identity, thread_id, list(request.attachment_ids)
+                )
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "UPLOAD_CHECKER_ON: files attached while the checker was off "
+                        "cannot be sent while it is on; remove them and attach a study ZIP"
+                    ),
+                )
             runtime.submit_message(
                 identity,
                 thread_id,

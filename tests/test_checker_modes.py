@@ -235,3 +235,80 @@ def test_middleware_refuses_when_the_identity_cannot_be_resolved() -> None:
     client.app.dependency_overrides[local_request_identity] = broken
     assert _raw_asgi_upload(client.app) == (409, False)
     assert runtime.staged == []
+
+
+# --- Switch races and files staged under the other setting (real store) ---------
+
+
+def _real_client(tmp_path, mode: str = "optional"):
+    from test_upload_plug_flag import CSV, _plug_settings, _route_runtime
+
+    runtime = _route_runtime(tmp_path)
+    settings, handle = _plug_settings([("dataset/dataset_1.csv", "text/csv", CSV)])
+    settings = UploadPlugSettings(
+        url=settings.url, secret=settings.secret, transport=settings.transport, mode=mode
+    )
+    client = TestClient(create_app(runtime, provider_api_key="unused", upload_plug=settings))
+    return client, runtime, handle
+
+
+def _send(client: TestClient, attachment_ids: list[str]):
+    return client.post(
+        f"/api/threads/{THREAD_ID}/messages",
+        json={"text": "What is the mean age?", "attachment_ids": attachment_ids},
+    )
+
+
+def test_switch_turned_on_during_a_plain_upload_refuses_the_staging(tmp_path, monkeypatch) -> None:
+    import api.server as server
+
+    client, runtime, _handle = _real_client(tmp_path)
+    assert _set(client, False).status_code == 200
+    original = server._read_bounded_attachment_uploads
+
+    async def read_then_switch_on(*args, **kwargs):
+        uploads = await original(*args, **kwargs)
+        client.app.state.upload_checker.set_on("local-user", True)
+        return uploads
+
+    monkeypatch.setattr(server, "_read_bounded_attachment_uploads", read_then_switch_on)
+    response = _plain(client)
+    assert response.status_code == 409
+    assert not any(p.name == "manifest.json" for p in tmp_path.rglob("*"))
+
+
+def test_files_staged_with_the_checker_off_cannot_be_sent_once_it_is_on(tmp_path) -> None:
+    client, runtime, _handle = _real_client(tmp_path)
+    assert _set(client, False).status_code == 200
+    staged = _plain(client)
+    assert staged.status_code == 200, staged.text
+    raw_id = staged.json()["attachments"][0]["id"]
+    assert _set(client, True).status_code == 200
+    response = _send(client, [raw_id])
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("UPLOAD_CHECKER_ON")
+
+
+def test_raw_files_staged_before_a_restart_in_required_mode_cannot_be_sent(tmp_path) -> None:
+    off_client, runtime, _handle = _real_client(tmp_path, mode="off")
+    raw_id = _plain(off_client).json()["attachments"][0]["id"]
+    from test_upload_plug_flag import CSV, _plug_settings
+
+    settings, _ = _plug_settings([("dataset/dataset_1.csv", "text/csv", CSV)])
+    required = TestClient(create_app(runtime, provider_api_key="unused", upload_plug=UploadPlugSettings(
+        url=settings.url, secret=settings.secret, transport=settings.transport, mode="required")))
+    response = _send(required, [raw_id])
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("UPLOAD_CHECKER_ON")
+
+
+def test_only_checker_files_pass_the_send_check(tmp_path) -> None:
+    client, runtime, handle = _real_client(tmp_path)
+    pulled = client.post(f"/api/threads/{THREAD_ID}/plug-attachments", json={"handle": handle})
+    assert pulled.status_code == 200, pulled.text
+    plug_id = pulled.json()["attachments"][0]["id"]
+    identity = local_request_identity()
+    assert runtime.attachments_passed_checker(identity, THREAD_ID, [plug_id]) is True
+    _set(client, False)
+    raw_id = _plain(client).json()["attachments"][0]["id"]
+    assert runtime.attachments_passed_checker(identity, THREAD_ID, [plug_id, raw_id]) is False

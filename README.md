@@ -112,6 +112,14 @@ kept in memory, so a restart turns the checker back on for everyone. The switch
 is disabled while files are staged or an upload is open. A plain upload is
 refused before any of its body is read whenever the checker is on for the user,
 including a request sent straight to the route without the app's page.
+Whenever the checker is on, a message may carry only files that came through
+it: files staged while it was off, or under an earlier mode before a restart,
+are refused (409 `UPLOAD_CHECKER_ON`) until they are removed. In `optional`
+mode with the checker off, a study ZIP can still go through the checker and its
+files keep the "Passed upload checker" badge. After a refusal the page asks the
+server for its current state again. The switch request carries no user of its
+own: it applies to the identity the app gives the request (one local user in
+the desktop app), so it is only as private as the app's local-only address.
 `optional` lets a user send unchecked files on purpose; real data deployments
 should use `required`.
 

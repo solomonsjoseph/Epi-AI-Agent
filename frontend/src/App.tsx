@@ -645,6 +645,16 @@ export default function App({
     generation: number,
   ) {
     if (requestError instanceof ApiError && requestError.status === 409) {
+      const detail = typeof requestError.detail === "string" ? requestError.detail : "";
+      if (/^(UPLOAD_PLUG_REQUIRED|UPLOAD_CHECKER_ON):/.test(detail)) {
+        // The server's checker state differs from what this page shows (for example after a
+        // restart turned it back on): show the server's state again.
+        try {
+          setUploadPlug((await apiClient.getUploadPlug?.()) ?? null);
+        } catch {
+          // Keep the shown state; the conflict message below still explains the refusal.
+        }
+      }
       try {
         const refreshedState = await apiClient.getThreadState(ownerThreadId);
         applyOwnedThreadState(ownerThreadId, generation, refreshedState);
