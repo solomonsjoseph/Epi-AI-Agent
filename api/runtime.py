@@ -2176,6 +2176,7 @@ class ReportAgentApiRuntime:
                     thread_id,
                     text,
                     title_generator,
+                    bool(attachment_ids),
                 )
             elif (
                 not thread.locked
@@ -2196,13 +2197,14 @@ class ReportAgentApiRuntime:
         thread_id: str,
         text: str,
         title_generator: OpenAIConversationTitleGenerator,
+        has_attachments: bool = False,
     ) -> None:
         try:
             assert self.history_store is not None
             self.history_store.set_automatic_title(
                 owner_user_id,
                 thread_id,
-                title_generator.generate(text),
+                title_generator.generate(text, has_attachments=has_attachments),
             )
         except Exception:
             return
