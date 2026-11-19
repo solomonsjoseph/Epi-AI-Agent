@@ -393,8 +393,8 @@ class ConversationTitleGenerator:
     def generate(self, first_message: str, *, has_attachments: bool = False) -> str:
         instructions = (
             "Return only a concise 4-8 word title describing the "
-            "user's analysis intent. Do not use quotes, markdown, "
-            "or a trailing period."
+            "user's analysis intent. Do not answer or carry out the "
+            "request. Do not use quotes, markdown, or a trailing period."
         )
         if has_attachments:
             # Only the fact that files exist is shared, never their names or contents.
@@ -411,7 +411,7 @@ class ConversationTitleGenerator:
         )
         title = ConversationHistoryStore._title(coerce_text_content(response.content))
         if _looks_like_reply(title):
-            return ConversationHistoryStore.fallback_title(first_message)
+            return _short_fallback(first_message)
         return title
 
 
@@ -420,6 +420,12 @@ _MAX_TITLE_WORDS = 10
 # "I ...", "I'm ...", "I'd ..." (straight or curly apostrophe).
 _FIRST_PERSON = re.compile(r"I(?:\s|['\u2019])")
 _REPLY_WORDS = re.compile(r"\b(?:access|cannot|can['\u2019]t)\b", re.IGNORECASE)
+
+
+def _short_fallback(first_message: str) -> str:
+    """The typed message as a title, cut at a word boundary to at most 10 words."""
+    words = ConversationHistoryStore.fallback_title(first_message).split()
+    return " ".join(words[:_MAX_TITLE_WORDS]).rstrip(",;:.")
 
 
 def _looks_like_reply(title: str) -> bool:
