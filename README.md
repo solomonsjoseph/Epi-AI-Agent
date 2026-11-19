@@ -86,18 +86,36 @@ anything reaches a conversation. It is off by default.
 
 ### Settings
 
-Set both in `.env` (or the environment) to turn it on:
+Set these in `.env` (or the environment). The URL and the secret are server
+settings only; the browser never sees the secret.
 
 | Variable | Meaning |
 | --- | --- |
+| `REPORT_AGENT_UPLOAD_CHECKER_MODE` | `off`, `optional` or `required`. Unset: `required` when a URL is set, `off` when not. Use `required` for real data. |
 | `REPORT_AGENT_UPLOAD_PLUG_URL` | The plug's origin only, for example `http://127.0.0.1:8090`. No path, query or credentials. Plain `http` only for `127.0.0.1`, `localhost` or `::1`; otherwise `https`. |
-| `REPORT_AGENT_UPLOAD_PLUG_SECRET` | Shared secret, at least 32 characters. The app refuses to start if the URL is set without it. |
+| `REPORT_AGENT_UPLOAD_PLUG_SECRET` | Shared secret, at least 32 characters. The app refuses to start if `optional` or `required` is set without the URL and the secret. |
 | `REPORT_AGENT_UPLOAD_PLUG_TIMEOUT_SECONDS` | Server-to-server timeout, default 30. |
 
-With no URL, the app behaves as before and shows a "PHI checker: off" badge next
-to the paperclip.
+### Modes
 
-### What changes when it is on
+| Mode | Paperclip | Plain upload route | Toggle |
+| --- | --- | --- | --- |
+| `off` | Any files, as before, with a "PHI checker: off" badge | Allowed | None |
+| `optional` | One study ZIP through the checker while the user has it on; any files while off, with the "PHI checker: off" badge | Refused (409) while the checker is on for that user | "PHI checker" switch next to the paperclip, starts on |
+| `required` | One study ZIP through the checker, always | Always refused (409) | None |
+
+The server holds the on/off state: `GET /api/upload-plug` returns the mode and
+whether the checker is on for this user, and in `optional` mode
+`PUT /api/upload-plug/checker` with `{"checker_on": true|false}` changes it for
+that user at once, with no restart (in other modes it returns 409). The state is
+kept in memory, so a restart turns the checker back on for everyone. The switch
+is disabled while files are staged or an upload is open. A plain upload is
+refused before any of its body is read whenever the checker is on for the user,
+including a request sent straight to the route without the app's page.
+`optional` lets a user send unchecked files on purpose; real data deployments
+should use `required`.
+
+### What changes when the checker is on
 
 - The paperclip accepts one `.zip` file only. Plain uploads to
   `/api/threads/{id}/attachments` are refused (409) before the body is read.

@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import threading
 import zipfile
 from dataclasses import dataclass, field
 from urllib.parse import quote, urlsplit
@@ -31,6 +32,11 @@ CONTRACT_VERSION = "2"
 PLUG_URL_ENV = "REPORT_AGENT_UPLOAD_PLUG_URL"
 PLUG_SECRET_ENV = "REPORT_AGENT_UPLOAD_PLUG_SECRET"
 PLUG_TIMEOUT_ENV = "REPORT_AGENT_UPLOAD_PLUG_TIMEOUT_SECONDS"
+PLUG_MODE_ENV = "REPORT_AGENT_UPLOAD_CHECKER_MODE"
+
+# off: no checker, plain uploads as before. optional: each user turns the checker on or off
+# in the chat (starts on). required: always on, no toggle; the setting for real data.
+CHECKER_MODES = ("off", "optional", "required")
 
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -84,10 +90,18 @@ class UploadPlugSettings:
     secret: str = field(default="", repr=False)
     timeout_seconds: float = 30.0
     transport: httpx.BaseTransport | None = None
+    # Empty means: required when a URL is set, off when not (the behaviour before modes).
+    mode: str = ""
+
+    @property
+    def checker_mode(self) -> str:
+        if self.mode:
+            return self.mode
+        return "required" if self.url else "off"
 
     @property
     def enabled(self) -> bool:
-        return bool(self.url)
+        return self.checker_mode != "off"
 
     @property
     def origin(self) -> str:
@@ -106,14 +120,19 @@ class UploadPlugSettings:
             url=(os.getenv(PLUG_URL_ENV) or "").strip().rstrip("/"),
             secret=(os.getenv(PLUG_SECRET_ENV) or "").strip(),
             timeout_seconds=float(os.getenv(PLUG_TIMEOUT_ENV) or "30"),
+            mode=(os.getenv(PLUG_MODE_ENV) or "").strip().lower(),
         )
         settings.validate()
         return settings
 
     def validate(self) -> None:
         """Refuse a half-configured plug at startup (fail closed)."""
-        if not self.url:
+        if self.mode and self.mode not in CHECKER_MODES:
+            raise ValueError(f"{PLUG_MODE_ENV} must be one of: {', '.join(CHECKER_MODES)}")
+        if not self.enabled:
             return
+        if not self.url:
+            raise ValueError(f"{PLUG_MODE_ENV}={self.checker_mode} needs {PLUG_URL_ENV}")
         parts = urlsplit(self.url)
         if parts.scheme not in {"http", "https"} or not parts.hostname:
             raise ValueError(f"{PLUG_URL_ENV} must be an http(s) URL")
@@ -134,6 +153,40 @@ class UploadPlugSettings:
             )
         if self.timeout_seconds <= 0:
             raise ValueError(f"{PLUG_TIMEOUT_ENV} must be positive")
+
+
+class UploadCheckerSwitch:
+    """Whether the checker is on for a user, held by the server only.
+
+    The browser shows this state and, in optional mode, asks to change it; it never
+    decides it. off and required are fixed; in optional mode each user starts on and a
+    change applies to that user's next upload at once (no restart). The state lives in
+    memory, so a restart turns every user back on.
+    """
+
+    def __init__(self, mode: str) -> None:
+        if mode not in CHECKER_MODES:
+            raise ValueError(f"unknown checker mode: {mode}")
+        self.mode = mode
+        self._off_users: set[str] = set()
+        self._lock = threading.Lock()
+
+    def is_on(self, owner_user_id: str) -> bool:
+        if self.mode == "off":
+            return False
+        if self.mode == "required":
+            return True
+        with self._lock:
+            return owner_user_id not in self._off_users
+
+    def set_on(self, owner_user_id: str, on: bool) -> None:
+        if self.mode != "optional":
+            raise ValueError(f"the checker cannot be switched in {self.mode} mode")
+        with self._lock:
+            if on:
+                self._off_users.discard(owner_user_id)
+            else:
+                self._off_users.add(owner_user_id)
 
 
 def quiet_http_logs() -> None:

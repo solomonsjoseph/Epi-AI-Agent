@@ -269,6 +269,8 @@ def test_plug_on_reports_origin_only() -> None:
     assert client.get("/api/upload-plug").json() == {
         "origin": PLUG_URL,
         "contract": "2",
+        "mode": "required",  # a URL with no mode set keeps the pre-modes behaviour
+        "checker_on": True,
         "caps": {
             "max_files": limits.max_files_per_message,
             "max_file_bytes": limits.max_bytes,

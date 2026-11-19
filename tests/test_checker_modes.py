@@ -1,0 +1,237 @@
+"""Upload checker modes: off, optional (per-user switch, starts on) and required.
+
+The mode is server config; the browser only shows it. In optional mode a user's
+switch applies to the next request at once, with no restart. Whenever the
+checker is on for a user, the plain upload route is refused before any of the
+body is read. Synthetic data only; no model provider or network.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from api.auth import AuthenticatedUser, RequestIdentity, local_request_identity
+from api.server import create_app
+from test_upload_plug import PLUG_URL, SECRET, THREAD_ID, FakePlug, FakeRuntime, _pull
+from utils.upload_plug import (
+    PLUG_MODE_ENV,
+    PLUG_SECRET_ENV,
+    PLUG_URL_ENV,
+    UploadCheckerSwitch,
+    UploadPlugSettings,
+)
+
+RAW = [("files", ("raw.csv", b"name,dob\nSynthetic Person,2001-02-03\n", "text/csv"))]
+
+
+def _client(mode: str, runtime: FakeRuntime | None = None, *, url: str = PLUG_URL) -> TestClient:
+    settings = UploadPlugSettings(
+        url=url, secret=SECRET, mode=mode, transport=httpx.MockTransport(FakePlug())
+    )
+    return TestClient(
+        create_app(runtime or FakeRuntime(), provider_api_key="unused", upload_plug=settings)
+    )
+
+
+def _plain(client: TestClient):
+    return client.post(f"/api/threads/{THREAD_ID}/attachments", files=RAW)
+
+
+def _set(client: TestClient, on: bool):
+    return client.put("/api/upload-plug/checker", json={"checker_on": on})
+
+
+def _raw_asgi_upload(app) -> tuple[int, bool]:
+    """Sends a plain upload straight to the ASGI app; returns (status, body_was_read)."""
+    scope = {
+        "type": "http", "method": "POST", "path": f"/api/threads/{THREAD_ID}/attachments",
+        "raw_path": f"/api/threads/{THREAD_ID}/attachments".encode(), "query_string": b"",
+        "headers": [(b"content-type", b"multipart/form-data; boundary=x"), (b"content-length", b"1000")],
+        "scheme": "http", "server": ("testserver", 80), "client": ("127.0.0.1", 1),
+        "http_version": "1.1", "root_path": "",
+    }
+    sent: list[dict] = []
+    read = {"body": False}
+
+    async def receive():
+        read["body"] = True
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(app(scope, receive, send))
+    return sent[0]["status"], read["body"]
+
+
+# --- Settings ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "env_mode, url, expected",
+    [
+        ("", "", "off"),
+        ("", PLUG_URL, "required"),  # no mode set: the pre-modes behaviour
+        ("off", PLUG_URL, "off"),
+        ("optional", PLUG_URL, "optional"),
+        ("required", PLUG_URL, "required"),
+        (" Optional ", PLUG_URL, "optional"),
+    ],
+)
+def test_mode_comes_from_server_config(monkeypatch, env_mode, url, expected) -> None:
+    monkeypatch.setenv(PLUG_MODE_ENV, env_mode)
+    monkeypatch.setenv(PLUG_URL_ENV, url)
+    monkeypatch.setenv(PLUG_SECRET_ENV, SECRET)
+    assert UploadPlugSettings.from_env().checker_mode == expected
+
+
+@pytest.mark.parametrize("mode", ["on", "true", "1", "requried"])
+def test_unknown_mode_refuses_to_start(mode: str) -> None:
+    with pytest.raises(ValueError):
+        create_app(
+            FakeRuntime(),
+            provider_api_key="unused",
+            upload_plug=UploadPlugSettings(url=PLUG_URL, secret=SECRET, mode=mode),
+        )
+
+
+@pytest.mark.parametrize("mode", ["optional", "required"])
+def test_checker_modes_without_url_or_secret_refuse_to_start(mode: str) -> None:
+    with pytest.raises(ValueError):
+        create_app(FakeRuntime(), provider_api_key="unused",
+                   upload_plug=UploadPlugSettings(mode=mode, secret=SECRET))
+    with pytest.raises(ValueError):
+        create_app(FakeRuntime(), provider_api_key="unused",
+                   upload_plug=UploadPlugSettings(url=PLUG_URL, mode=mode))
+
+
+def test_switch_is_per_user_and_fixed_outside_optional() -> None:
+    switch = UploadCheckerSwitch("optional")
+    assert switch.is_on("a") and switch.is_on("b")
+    switch.set_on("a", False)
+    assert not switch.is_on("a") and switch.is_on("b")
+    switch.set_on("a", True)
+    assert switch.is_on("a")
+    for mode, on in (("off", False), ("required", True)):
+        fixed = UploadCheckerSwitch(mode)
+        assert fixed.is_on("a") is on
+        with pytest.raises(ValueError):
+            fixed.set_on("a", not on)
+
+
+# --- off -------------------------------------------------------------------------
+
+
+def test_off_mode_works_as_before_even_with_a_url() -> None:
+    runtime = FakeRuntime()
+    client = _client("off", runtime)
+    assert client.get("/api/upload-plug").json() is None
+    response = _plain(client)
+    assert response.status_code == 200
+    assert [a["deidentified"] for a in response.json()["attachments"]] == [False]
+    assert _pull(client).status_code == 404
+    assert _set(client, True).status_code == 409
+
+
+# --- required --------------------------------------------------------------------
+
+
+def test_required_mode_is_always_on_with_no_switch() -> None:
+    runtime = FakeRuntime()
+    client = _client("required", runtime)
+    info = client.get("/api/upload-plug").json()
+    assert (info["mode"], info["checker_on"]) == ("required", True)
+    response = _set(client, False)
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("CHECKER_MODE_FIXED")
+    assert client.get("/api/upload-plug").json()["checker_on"] is True
+    assert _plain(client).status_code == 409
+    assert runtime.staged == []
+
+
+def test_required_mode_refuses_a_raw_upload_before_the_body_is_read() -> None:
+    runtime = FakeRuntime()
+    assert _raw_asgi_upload(_client("required", runtime).app) == (409, False)
+    assert runtime.staged == []
+
+
+def test_required_mode_plug_route_flags_files() -> None:
+    runtime = FakeRuntime()
+    response = _pull(_client("required", runtime))
+    assert response.status_code == 200
+    assert runtime.deidentified == [True]
+
+
+# --- optional --------------------------------------------------------------------
+
+
+def test_optional_mode_starts_on_and_refuses_a_raw_upload() -> None:
+    runtime = FakeRuntime()
+    client = _client("optional", runtime)
+    info = client.get("/api/upload-plug").json()
+    assert (info["mode"], info["checker_on"]) == ("optional", True)
+    response = _plain(client)
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("UPLOAD_PLUG_REQUIRED")
+    assert _raw_asgi_upload(client.app) == (409, False)
+    assert runtime.staged == []
+
+
+def test_optional_mode_switch_applies_at_once_without_restart() -> None:
+    runtime = FakeRuntime()
+    client = _client("optional", runtime)
+    response = _set(client, False)
+    assert response.status_code == 200
+    assert response.json()["checker_on"] is False
+    plain = _plain(client)
+    assert plain.status_code == 200
+    # The badge stays server-set: a plain upload is never marked as checked.
+    assert [a["deidentified"] for a in plain.json()["attachments"]] == [False]
+    assert runtime.deidentified == [False]
+    assert _set(client, True).json()["checker_on"] is True
+    assert _plain(client).status_code == 409
+    assert _raw_asgi_upload(client.app) == (409, False)
+    assert len(runtime.staged) == 1
+
+
+def test_optional_mode_plug_route_flags_files() -> None:
+    runtime = FakeRuntime()
+    response = _pull(_client("optional", runtime))
+    assert response.status_code == 200
+    assert [a["deidentified"] for a in response.json()["attachments"]] == [True, True]
+
+
+def test_optional_switch_request_takes_only_a_boolean() -> None:
+    client = _client("optional")
+    assert client.put("/api/upload-plug/checker", json={"checker_on": False, "user": "x"}).status_code == 422
+    assert client.put("/api/upload-plug/checker", json={}).status_code == 422
+    assert client.get("/api/upload-plug").json()["checker_on"] is True
+
+
+def test_optional_switch_of_one_user_does_not_reach_another() -> None:
+    runtime = FakeRuntime()
+    client = _client("optional", runtime)
+    assert _set(client, False).status_code == 200  # the local user turns it off
+    other = RequestIdentity(user=AuthenticatedUser(owner_user_id="other-user"), session_id="s")
+    client.app.dependency_overrides[local_request_identity] = lambda: other
+    assert client.get("/api/upload-plug").json()["checker_on"] is True
+    assert _plain(client).status_code == 409
+    assert _raw_asgi_upload(client.app) == (409, False)
+    assert runtime.staged == []
+
+
+def test_middleware_refuses_when_the_identity_cannot_be_resolved() -> None:
+    runtime = FakeRuntime()
+    client = _client("optional", runtime)
+    _set(client, False)
+
+    def broken():
+        raise RuntimeError("no identity")
+
+    client.app.dependency_overrides[local_request_identity] = broken
+    assert _raw_asgi_upload(client.app) == (409, False)
+    assert runtime.staged == []

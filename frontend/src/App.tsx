@@ -209,6 +209,9 @@ export default function App({
   // answer fails, attaching stays disabled: an unknown checker state never falls back to "off".
   const [uploadPlugChecked, setUploadPlugChecked] = useState(false);
   const [uploadPlugCheckFailed, setUploadPlugCheckFailed] = useState(false);
+  const [isSwitchingChecker, setIsSwitchingChecker] = useState(false);
+  // The checker is on for this user only when the server says so (required, or optional and on).
+  const checkerActive = uploadPlug !== null && uploadPlug.checker_on;
   const [pendingPlugUpload, setPendingPlugUpload] = useState<{
     threadId: string;
     generation: number;
@@ -907,11 +910,24 @@ export default function App({
     ]);
   }
 
+  async function switchUploadChecker(on: boolean) {
+    setIsSwitchingChecker(true);
+    try {
+      // The server answers with the state it now holds; the toggle only ever shows that.
+      setUploadPlug(await apiClient.setUploadChecker(on));
+      setError(null);
+    } catch (switchError) {
+      setError(errorMessage(switchError));
+    } finally {
+      setIsSwitchingChecker(false);
+    }
+  }
+
   async function selectAttachments(files: File[]) {
     if (!runtimeOptions || !files.length || isBusy) {
       return;
     }
-    if (uploadPlug) {
+    if (checkerActive) {
       if (files.length !== 1 || !files[0].name.toLowerCase().endsWith(".zip")) {
         setAttachmentErrors((current) => [
           ...current,
@@ -1581,13 +1597,28 @@ export default function App({
               onFilesSelected={selectAttachments}
               onRemove={removeStagedAttachment}
               staged={stagedAttachments}
-              zipOnly={uploadPlug !== null}
-              checkerOff={uploadPlugChecked && uploadPlug === null}
-              attachDisabled={!uploadPlugChecked}
+              zipOnly={checkerActive}
+              checkerOff={uploadPlugChecked && !checkerActive}
+              attachDisabled={!uploadPlugChecked || isSwitchingChecker}
               checkerUnknown={uploadPlugCheckFailed}
+              checkerToggle={
+                uploadPlug?.mode === "optional"
+                  ? {
+                      on: uploadPlug.checker_on,
+                      // No switching with files staged or an upload open: staged files
+                      // were attached under the other setting.
+                      disabled:
+                        isSwitchingChecker ||
+                        isUploadingAttachments ||
+                        pendingPlugUpload !== null ||
+                        stagedAttachments.length > 0,
+                      onChange: (on) => void switchUploadChecker(on),
+                    }
+                  : null
+              }
             />
           </form>
-          {uploadPlug && pendingPlugUpload ? (
+          {uploadPlug && checkerActive && pendingPlugUpload ? (
             <UploadPlugModal
               file={pendingPlugUpload.file}
               onCancel={() => setPendingPlugUpload(null)}

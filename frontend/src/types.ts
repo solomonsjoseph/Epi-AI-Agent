@@ -180,6 +180,10 @@ export interface UploadPlugInfo {
   origin: string;
   contract: string;
   caps: UploadPlugCaps;
+  // Server-set. "required": always on, no toggle. "optional": each user may switch it.
+  mode: "optional" | "required";
+  // Whether the checker is on for this user now; only the server decides it.
+  checker_on: boolean;
 }
 
 export interface AttachmentUploadResult {

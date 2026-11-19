@@ -250,6 +250,19 @@ export async function getUploadPlug(
   return parseJsonResponse<UploadPlugInfo | null>(response);
 }
 
+export async function setUploadChecker(
+  fetchImpl: FetchImpl = fetch,
+  apiBase = "",
+  checkerOn: boolean,
+): Promise<UploadPlugInfo> {
+  const response = await fetchImpl(apiUrl(apiBase, "/api/upload-plug/checker"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ checker_on: checkerOn }),
+  });
+  return parseJsonResponse<UploadPlugInfo>(response);
+}
+
 export async function stagePlugAttachments(
   fetchImpl: FetchImpl = fetch,
   apiBase = "",
@@ -530,6 +543,9 @@ export function createApiClient({
     },
     getUploadPlug() {
       return getUploadPlug(localFetch, apiBase);
+    },
+    setUploadChecker(checkerOn: boolean) {
+      return setUploadChecker(localFetch, apiBase, checkerOn);
     },
     stagePlugAttachments(threadId: string, handle: string) {
       return stagePlugAttachments(localFetch, apiBase, threadId, handle);

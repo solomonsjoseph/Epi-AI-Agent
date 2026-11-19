@@ -2217,6 +2217,21 @@ select {
   border: 0;
 }
 
+.upload-checker-toggle {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.upload-checker-toggle input:disabled {
+  cursor: not-allowed;
+}
+
 .upload-checker-badge {
   align-self: center;
   padding: 2px 8px;

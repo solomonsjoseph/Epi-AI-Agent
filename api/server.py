@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import inspect
 from pathlib import Path
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Literal
 from urllib.parse import quote
 
 from fastapi import (
@@ -53,6 +54,7 @@ from utils.attachment_artifacts import AttachmentError, AttachmentLimits
 from utils.review_interrupts import InvalidInterruptDecisionError
 from utils.upload_plug import (
     CONTRACT_VERSION as UPLOAD_PLUG_CONTRACT,
+    UploadCheckerSwitch,
     UploadPlugError,
     UploadPlugSettings,
     fetch_delivery,
@@ -75,6 +77,16 @@ class UploadPlugInfo(BaseModel):
     origin: str
     contract: str
     caps: UploadPlugCaps
+    # Set by the server: "required" shows no toggle; "optional" shows one.
+    mode: Literal["optional", "required"]
+    # Whether the checker is on for this user now (always true in required mode).
+    checker_on: bool
+
+
+class UploadCheckerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    checker_on: bool
 
 
 class PlugAttachmentRequest(BaseModel):
@@ -109,11 +121,18 @@ def _content_disposition(disposition: str, filename: str) -> str:
 
 
 class AttachmentRequestBodyLimitMiddleware:
-    def __init__(self, app: Any, *, max_bytes: int, refuse_uploads: bool = False) -> None:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        max_bytes: int,
+        refuse_uploads: bool | Callable[[], bool] = False,
+    ) -> None:
         self.app = app
         self.max_bytes = max_bytes
-        # With the upload plug on, plain uploads are refused before any of the body is read,
+        # With the checker on, plain uploads are refused before any of the body is read,
         # so raw file bytes never reach this process (no multipart parsing, no temp files).
+        # A callable is asked on every request, so a user's switch applies at once.
         self.refuse_uploads = refuse_uploads
 
     async def __call__(self, scope, receive, send) -> None:
@@ -125,7 +144,8 @@ class AttachmentRequestBodyLimitMiddleware:
         if not is_attachment_upload:
             await self.app(scope, receive, send)
             return
-        if self.refuse_uploads:
+        refuse = self.refuse_uploads() if callable(self.refuse_uploads) else self.refuse_uploads
+        if refuse:
             response = JSONResponse(
                 status_code=409,
                 content={
@@ -243,8 +263,20 @@ def create_app(
     attachment_limits = runtime.attachment_limits
     plug = upload_plug if upload_plug is not None else UploadPlugSettings.from_env()
     plug.validate()
+    checker = UploadCheckerSwitch(plug.checker_mode)
     if plug.enabled:
         quiet_http_logs()
+
+    def checker_on_for_request() -> bool:
+        # Middleware runs before dependencies, so it resolves the identity the same way the
+        # routes do (including any override). Any error refuses the upload (fail closed).
+        if checker.mode == "off":
+            return False
+        try:
+            resolve = app.dependency_overrides.get(local_request_identity, local_request_identity)
+            return checker.is_on(resolve().owner_user_id)
+        except Exception:
+            return True
 
     app.add_middleware(
         AttachmentRequestBodyLimitMiddleware,
@@ -252,7 +284,7 @@ def create_app(
             attachment_limits.max_message_bytes
             + _MULTIPART_OVERHEAD_BYTES
         ),
-        refuse_uploads=plug.enabled,
+        refuse_uploads=checker_on_for_request,
     )
 
     def provider_key_for_work(
@@ -405,7 +437,7 @@ def create_app(
     ) -> AttachmentUploadResult:
         try:
             runtime.authorize_thread(identity, thread_id)
-            if plug.enabled:
+            if checker.is_on(identity.owner_user_id):
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -441,16 +473,13 @@ def create_app(
         except AttachmentError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @api.get("/api/upload-plug")
-    def upload_plug_info(
-        _identity: RequestIdentity = Depends(local_request_identity),
-    ) -> UploadPlugInfo | None:
-        if not plug.enabled:
-            return None
+    def plug_info(identity: RequestIdentity) -> UploadPlugInfo:
         limits = runtime.attachment_limits
         return UploadPlugInfo(
             origin=plug.origin,
             contract=UPLOAD_PLUG_CONTRACT,
+            mode=checker.mode,
+            checker_on=checker.is_on(identity.owner_user_id),
             caps=UploadPlugCaps(
                 max_files=limits.max_files_per_message,
                 max_file_bytes=limits.max_bytes,
@@ -460,6 +489,27 @@ def create_app(
                 max_table_cells=limits.max_table_cells,
             ),
         )
+
+    @api.get("/api/upload-plug")
+    def upload_plug_info(
+        identity: RequestIdentity = Depends(local_request_identity),
+    ) -> UploadPlugInfo | None:
+        if not plug.enabled:
+            return None
+        return plug_info(identity)
+
+    @api.put("/api/upload-plug/checker")
+    def set_upload_checker(
+        request: UploadCheckerRequest,
+        identity: RequestIdentity = Depends(local_request_identity),
+    ) -> UploadPlugInfo:
+        if checker.mode != "optional":
+            raise HTTPException(
+                status_code=409,
+                detail=f"CHECKER_MODE_FIXED: the upload checker is {checker.mode} on this server",
+            )
+        checker.set_on(identity.owner_user_id, request.checker_on)
+        return plug_info(identity)
 
     @api.post(
         "/api/threads/{thread_id}/plug-attachments",

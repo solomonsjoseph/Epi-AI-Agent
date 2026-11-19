@@ -17,6 +17,12 @@ interface Props {
   attachDisabled?: boolean;
   // The app could not say whether a checker is configured; attaching stays off.
   checkerUnknown?: boolean;
+  // Optional mode only: the user's checker switch. The server holds the state.
+  checkerToggle?: {
+    on: boolean;
+    disabled: boolean;
+    onChange(on: boolean): void;
+  } | null;
   onFilesSelected(files: File[]): void;
   onDismissError(index: number): void;
   onRemove(attachmentId: string): Promise<void>;
@@ -47,6 +53,7 @@ export default function AttachmentComposer({
   checkerOff = false,
   attachDisabled = false,
   checkerUnknown = false,
+  checkerToggle = null,
   onFilesSelected,
   onDismissError,
   onRemove,
@@ -156,6 +163,26 @@ export default function AttachmentComposer({
               />
             </svg>
           </button>
+          {checkerToggle ? (
+            <label
+              className="upload-checker-toggle"
+              title={
+                checkerToggle.on
+                  ? "PHI checker on: attach one study ZIP; it is checked before the assistant sees it."
+                  : "PHI checker off: attached files are not checked for protected health information. Use it on for real data."
+              }
+            >
+              <input
+                aria-label="PHI checker"
+                checked={checkerToggle.on}
+                disabled={disabled || checkerToggle.disabled}
+                onChange={(event) => checkerToggle.onChange(event.target.checked)}
+                role="switch"
+                type="checkbox"
+              />
+              PHI checker
+            </label>
+          ) : null}
           {checkerOff ? (
             <span
               className="upload-checker-badge"
