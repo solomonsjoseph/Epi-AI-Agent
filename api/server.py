@@ -269,6 +269,43 @@ def create_app(
     if plug.enabled:
         quiet_http_logs()
 
+    def thread_has_unchecked_inputs(identity: RequestIdentity, thread_id: str) -> bool:
+        """True if any file already sent in this conversation did not come through the checker.
+
+        Earlier input files stay readable by the model's tools on every later turn and on a
+        review resume, so while the checker is on such a conversation cannot go on. The flag is
+        read from each stored manifest; a file that cannot be read counts as unchecked."""
+        try:
+            state = runtime.state(identity, thread_id)
+        except KeyError:
+            return False  # no conversation yet: nothing was sent
+        ids = sorted(
+            {
+                attachment.id
+                for message in state.conversation
+                for attachment in message.attachments
+                if attachment.relationship == "input"
+            }
+        )
+        if not ids:
+            return False
+        try:
+            return not runtime.attachments_passed_checker(identity, thread_id, ids)
+        except AttachmentError:
+            return True
+
+    def refuse_unchecked_thread(identity: RequestIdentity, thread_id: str) -> None:
+        if checker.is_on(identity.owner_user_id) and thread_has_unchecked_inputs(
+            identity, thread_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "UPLOAD_CHECKER_ON: this conversation holds files sent while the "
+                    "checker was off; start a new conversation for checked files"
+                ),
+            )
+
     def checker_on_for_request() -> bool:
         # Middleware runs before dependencies, so it resolves the identity the same way the
         # routes do (including any override). Any error refuses the upload (fail closed).
@@ -791,6 +828,7 @@ def create_app(
                         "cannot be sent while it is on; remove them and attach a study ZIP"
                     ),
                 )
+            refuse_unchecked_thread(identity, thread_id)
             runtime.submit_message(
                 identity,
                 thread_id,
@@ -844,6 +882,7 @@ def create_app(
     ) -> ApiThreadState:
         provider_key = provider_key_for_work(identity, thread_id)
         try:
+            refuse_unchecked_thread(identity, thread_id)
             runtime.resume_interrupt(
                 identity,
                 thread_id,

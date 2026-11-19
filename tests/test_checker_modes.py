@@ -312,3 +312,76 @@ def test_only_checker_files_pass_the_send_check(tmp_path) -> None:
     _set(client, False)
     raw_id = _plain(client).json()["attachments"][0]["id"]
     assert runtime.attachments_passed_checker(identity, THREAD_ID, [plug_id, raw_id]) is False
+
+
+# --- Files already sent in a conversation (later turns and review resumes) -----------
+
+
+def _thread_with_input(runtime, attachment_id: str):
+    from api.schemas import ApiThreadState, ConversationAttachment, ConversationMessage, RunStatus
+
+    state = ApiThreadState(
+        thread_id=THREAD_ID,
+        run=RunStatus(state="idle"),
+        conversation=[
+            ConversationMessage(
+                id="user-1",
+                role="user",
+                text="Earlier question",
+                attachments=[ConversationAttachment(id=attachment_id, relationship="input")],
+            )
+        ],
+    )
+    runtime.state = lambda *args, **kwargs: state
+
+
+def test_text_only_turn_is_refused_when_an_earlier_file_was_unchecked(tmp_path) -> None:
+    client, runtime, _handle = _real_client(tmp_path)
+    _set(client, False)
+    raw_id = _plain(client).json()["attachments"][0]["id"]
+    _thread_with_input(runtime, raw_id)  # the raw file was sent in an earlier turn
+    _set(client, True)
+    sent: list[object] = []
+    runtime.submit_message = lambda *args, **kwargs: sent.append(args)
+    response = _send(client, [])
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("UPLOAD_CHECKER_ON")
+    assert sent == []
+
+
+def test_review_resume_is_refused_when_an_earlier_file_was_unchecked(tmp_path) -> None:
+    client, runtime, _handle = _real_client(tmp_path)
+    _set(client, False)
+    raw_id = _plain(client).json()["attachments"][0]["id"]
+    _thread_with_input(runtime, raw_id)
+    _set(client, True)
+    resumed: list[object] = []
+    runtime.resume_interrupt = lambda *args, **kwargs: resumed.append(args)
+    response = client.post(
+        f"/api/threads/{THREAD_ID}/interrupts/i-1/resume", json={"action": "continue"}
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("UPLOAD_CHECKER_ON")
+    assert resumed == []
+
+
+def test_conversation_with_only_checked_files_goes_on(tmp_path) -> None:
+    client, runtime, handle = _real_client(tmp_path)
+    pulled = client.post(f"/api/threads/{THREAD_ID}/plug-attachments", json={"handle": handle})
+    plug_id = pulled.json()["attachments"][0]["id"]
+    _thread_with_input(runtime, plug_id)
+    sent: list[object] = []
+    runtime.submit_message = lambda *args, **kwargs: sent.append(args)
+    assert _send(client, []).status_code == 200
+    assert len(sent) == 1
+
+
+def test_unchecked_earlier_file_is_fine_while_the_checker_is_off(tmp_path) -> None:
+    client, runtime, _handle = _real_client(tmp_path)
+    _set(client, False)
+    raw_id = _plain(client).json()["attachments"][0]["id"]
+    _thread_with_input(runtime, raw_id)
+    sent: list[object] = []
+    runtime.submit_message = lambda *args, **kwargs: sent.append(args)
+    assert _send(client, []).status_code == 200
+    assert len(sent) == 1
