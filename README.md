@@ -114,7 +114,10 @@ refused before any of its body is read whenever the checker is on for the user,
 including a request sent straight to the route without the app's page.
 Whenever the checker is on, a message may carry only files that came through
 it: files staged while it was off, or under an earlier mode before a restart,
-are refused (409 `UPLOAD_CHECKER_ON`) until they are removed. In `optional`
+are refused (409 `UPLOAD_CHECKER_ON`) until they are removed. A conversation
+that already holds files sent while the checker was off cannot go on (new
+messages and review answers are refused with the same code) while it is on,
+because the model can still read those earlier files: start a new conversation. In `optional`
 mode with the checker off, a study ZIP can still go through the checker and its
 files keep the "Passed upload checker" badge. After a refusal the page asks the
 server for its current state again. The switch request carries no user of its
