@@ -28,7 +28,7 @@ def _sent_text(model: StubModel) -> str:
     return "\n".join(str(message.content) for message in model.calls[-1])
 
 
-CURLY_CANT = "can" + "’" + "t"
+CURLY_CANT = "can" + chr(0x2019) + "t"
 
 
 @pytest.mark.parametrize(
