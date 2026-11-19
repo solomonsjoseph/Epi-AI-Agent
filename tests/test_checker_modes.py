@@ -406,3 +406,23 @@ def test_a_staged_but_unsent_raw_file_does_not_block_the_conversation(tmp_path) 
     runtime.submit_message = lambda *args, **kwargs: sent.append(args)
     assert _send(client, []).status_code == 200
     assert len(sent) == 1
+
+
+def test_reading_the_state_never_restarts_a_run_over_unchecked_files(tmp_path) -> None:
+    client, runtime, _handle = _real_client(tmp_path)
+    _set(client, False)
+    raw_id = _plain(client).json()["attachments"][0]["id"]
+    _thread_with_input(runtime, raw_id)
+    keys: list[object] = []
+    stub = runtime.state
+
+    def recording_state(*args, provider_api_key=None, **kwargs):
+        keys.append(provider_api_key)
+        return stub(*args, **kwargs)
+
+    runtime.state = recording_state
+    assert client.get(f"/api/threads/{THREAD_ID}/state").status_code == 200
+    _set(client, True)
+    assert client.get(f"/api/threads/{THREAD_ID}/state").status_code == 200
+    # Off: the key is passed (recovery allowed); on with an unchecked file: no key, read only.
+    assert keys == ["unused", None]
