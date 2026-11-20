@@ -428,15 +428,35 @@ def _plug_settings(members: list[tuple[str, str, bytes]]):
 
     from utils.upload_plug import UploadPlugSettings
 
+    files = [
+        {"path": path, "sha256": hashlib.sha256(content).hexdigest(), "size": len(content)}
+        for path, _mime, content in members
+    ]
+    report = json.dumps(
+        {
+            "contract": "3",
+            "files": files,
+            "report_version": 1,
+            "second_scan": {"files": len(members), "open_items": 0, "result": "PASS"},
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as bundle:
-        for path, _mime, content in members:
+        for path, content in [(p, c) for p, _m, c in members] + [("report/report.json", report)]:
             info = zipfile.ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_STORED
             bundle.writestr(info, content)
     archive = buffer.getvalue()
     manifest = {
-        "contract": "2",
+        "contract": "3",
+        "report": {
+            "path": "report/report.json",
+            "mime": "application/json",
+            "size": len(report),
+            "sha256": hashlib.sha256(report).hexdigest(),
+        },
         "archive": {"size": len(archive), "sha256": hashlib.sha256(archive).hexdigest()},
         "members": [
             {

@@ -157,19 +157,42 @@ def _zip(entries, *, method=zipfile.ZIP_DEFLATED) -> bytes:
     return buffer.getvalue()
 
 
-def _member_zip(members=MEMBERS, *, method=zipfile.ZIP_DEFLATED) -> bytes:
-    return _zip([(path, content) for path, _mime, content in members], method=method)
+REPORT_PATH = "report/report.json"
 
 
-def _size_bound(members) -> int:
-    """v1_design 15.2: sum(sizes) + 22 + sum(76 + 2 * len(path))."""
-    return sum(len(content) for _path, _mime, content in members) + 22 + sum(
-        76 + 2 * len(path) for path, _mime, _content in members
-    )
+def _report(members=MEMBERS, **override) -> bytes:
+    """Contract 3: the plug's per-upload report for ``members`` (codes, counts, hashes only)."""
+    body = {
+        "contract": "3",
+        "files": [
+            {"path": path, "sha256": hashlib.sha256(content).hexdigest(), "size": len(content)}
+            for path, _mime, content in members
+        ],
+        "gate": "0.7.0",
+        "report_version": 1,
+        "second_scan": {"files": len(members), "open_items": 0, "result": "PASS"},
+        "skipped_files": 0,
+        "tallies": [{"action": "REMOVED_BY_GATE", "category": "NAME", "items": 3}],
+        **override,
+    }
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("ascii")
 
 
-def _manifest(members=MEMBERS, archive: bytes | None = None, contract="2") -> dict:
-    archive = _member_zip(members) if archive is None else archive
+def _member_zip(members=MEMBERS, *, method=zipfile.ZIP_DEFLATED, report: bytes | None = None) -> bytes:
+    report = _report(members) if report is None else report
+    return _zip([(path, content) for path, _mime, content in members] + [(REPORT_PATH, report)], method=method)
+
+
+def _size_bound(members, report: bytes | None = None) -> int:
+    """v1_design 15.2: sum(sizes) + 22 + sum(76 + 2 * len(path)), the report counted as an entry."""
+    report = _report(members) if report is None else report
+    entries = [(path, content) for path, _mime, content in members] + [(REPORT_PATH, report)]
+    return sum(len(content) for _path, content in entries) + 22 + sum(76 + 2 * len(path) for path, _c in entries)
+
+
+def _manifest(members=MEMBERS, archive: bytes | None = None, contract="3", report: bytes | None = None) -> dict:
+    report = _report(members) if report is None else report
+    archive = _member_zip(members, report=report) if archive is None else archive
     return {
         "contract": contract,
         "archive": {
@@ -185,6 +208,12 @@ def _manifest(members=MEMBERS, archive: bytes | None = None, contract="2") -> di
             }
             for path, mime, content in members
         ],
+        "report": {
+            "path": REPORT_PATH,
+            "mime": "application/json",
+            "size": len(report),
+            "sha256": hashlib.sha256(report).hexdigest(),
+        },
     }
 
 
@@ -268,7 +297,7 @@ def test_plug_on_reports_origin_only() -> None:
     limits = AttachmentLimits()
     assert client.get("/api/upload-plug").json() == {
         "origin": PLUG_URL,
-        "contract": "2",
+        "contract": "3",
         "caps": {
             "max_files": limits.max_files_per_message,
             "max_file_bytes": limits.max_bytes,
@@ -316,12 +345,12 @@ def test_plug_pull_unzips_and_stages_members_by_basename() -> None:
             ],
         )
     ]
-    # Contract 2 only: the manifest, then the one archive; never the per-file route.
+    # Contract 3 only: the manifest, then the one archive; never the per-file route.
     assert [r.url.path for r in plug.requests] == [
         f"/v1/deliveries/{HANDLE}",
         f"/v1/deliveries/{HANDLE}/archive",
     ]
-    assert all(r.headers["x-gate-contract"] == "2" for r in plug.requests)
+    assert all(r.headers["x-gate-contract"] == "3" for r in plug.requests)
     assert all(r.url.params["thread_id"] == THREAD_ID for r in plug.requests)
 
 
@@ -382,7 +411,7 @@ def test_plug_pull_accepts_a_stored_archive_at_the_size_bound() -> None:
 
 def test_plug_pull_stages_in_manifest_order_whatever_the_archive_order() -> None:
     runtime = FakeRuntime()
-    archive = _member_zip(list(reversed(MEMBERS)))
+    archive = _member_zip(list(reversed(MEMBERS)), report=_report(MEMBERS))
     response = _pull(_plug_client(runtime, FakePlug(archive=archive)))
     assert response.status_code == 200
     assert [name for name, _mime, _content in runtime.staged[0][1]] == [
@@ -578,7 +607,9 @@ def _archive_refusal(archive: bytes, members=MEMBERS) -> str:
 
 
 def _stored_one(name: str = "dataset/dataset_1.csv", content: bytes = DATASET) -> bytes:
-    return _zip([(name, content)], method=zipfile.ZIP_STORED)
+    # the report (contract 3) follows the member, so the member stays the first entry
+    report = _report([(name, "text/csv", content)])
+    return _zip([(name, content), (REPORT_PATH, report)], method=zipfile.ZIP_STORED)
 
 
 ONE = MEMBERS[:1]
@@ -638,7 +669,8 @@ def test_plug_entry_size_differing_from_the_manifest_is_refused() -> None:
 def test_plug_entry_hash_differing_from_the_manifest_is_refused() -> None:
     tampered = DATASET.replace(b"S007", b"S070", 1)
     assert len(tampered) == len(DATASET)
-    detail = _archive_refusal(_zip([("dataset/dataset_1.csv", tampered)]), ONE)
+    archive = _zip([("dataset/dataset_1.csv", tampered), (REPORT_PATH, _report(ONE))])
+    detail = _archive_refusal(archive, ONE)
     assert detail == "PLUG_REJECTED: a prepared file did not match its checksum"
 
 
@@ -869,8 +901,10 @@ def test_plug_refusal_logs_no_archive_detail(caplog) -> None:
 
 def test_plug_size_bound_matches_the_checker_formula() -> None:
     # The same example is pinned in the gate's tests: one 100-byte member at
-    # dataset/dataset_1.csv (21 characters) gives 100 + 22 + 76 + 42 = 240.
-    assert _size_bound([("dataset/dataset_1.csv", "text/csv", b"x" * 100)]) == 240
+    # dataset/dataset_1.csv (21 characters) gives 100 + 22 + 76 + 42 = 240. Contract 3 adds the
+    # report as one more entry: a 50-byte report at report/report.json (18 characters) adds
+    # 50 + 76 + 36.
+    assert _size_bound([("dataset/dataset_1.csv", "text/csv", b"x" * 100)], report=b"y" * 50) == 240 + 50 + 76 + 36
 
 
 @pytest.mark.parametrize(
@@ -917,3 +951,94 @@ def test_plug_asks_for_no_compressed_transfer_and_refuses_one() -> None:
             return response
 
     assert _refused(GzipPlug()) == "PLUG_REJECTED: the upload plug sent an encoded response"
+
+
+# Contract 3: the plug's per-upload report is checked and never staged.
+
+
+def test_plug_report_is_checked_and_never_staged() -> None:
+    runtime = FakeRuntime()
+    response = _pull(_plug_client(runtime, FakePlug()))
+    assert response.status_code == 200
+    staged = [name for name, _mime, _content in runtime.staged[0][1]]
+    assert staged == ["dataset_1.csv", "dictionary_1.json"]
+    assert all("report" not in a["filename"] for a in response.json()["attachments"])
+
+
+def test_plug_contract_2_manifest_is_a_contract_mismatch() -> None:
+    manifest = _manifest()
+    manifest["contract"] = "2"
+    manifest.pop("report")
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug).startswith("CONTRACT_MISMATCH")
+    assert not plug.archive_requested
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param(lambda m: m.pop("report"), id="missing"),
+        pytest.param(lambda m: m["report"].update(path="metadata/report.json"), id="path"),
+        pytest.param(lambda m: m["report"].update(mime="text/plain"), id="mime"),
+        pytest.param(lambda m: m["report"].update(size=0), id="empty"),
+        pytest.param(lambda m: m["report"].update(size=64 * 1024 + 1), id="too-large"),
+        pytest.param(lambda m: m["report"].update(sha256="A" * 64), id="digest"),
+        pytest.param(lambda m: m["report"].update(name="x"), id="extra-field"),
+    ],
+)
+def test_plug_bad_report_entry_is_refused_before_fetch(change) -> None:
+    manifest = _manifest()
+    change(manifest)
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug).startswith("PLUG_REJECTED")
+    assert not plug.archive_requested
+
+
+def _report_refusal(report: bytes, archive: bytes | None = None) -> str:
+    manifest = _manifest(report=report, archive=archive)
+    archive = _member_zip(report=report) if archive is None else archive
+    plug = FakePlug(manifest=manifest, archive=archive)
+    detail = _refused(plug)
+    assert plug.archive_requested
+    return detail
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        pytest.param(_report(MEMBERS[:1]), id="fewer-files"),
+        pytest.param(_report([(p, m, c + b"x") for p, m, c in MEMBERS]), id="other-hash"),
+        pytest.param(_report(list(reversed(MEMBERS))), id="other-order"),
+        pytest.param(_report(second_scan={"files": 2, "open_items": 1, "result": "PASS"}), id="open-items"),
+        pytest.param(_report(second_scan={"files": 2, "open_items": 0, "result": "FAIL"}), id="scan-failed"),
+        pytest.param(_report(contract="2"), id="contract"),
+        pytest.param(_report(report_version=2), id="version"),
+        pytest.param(b"not json", id="not-json"),
+        pytest.param(b"[1, 2]", id="not-object"),
+        pytest.param('{"contract": "3", "x": "\u00e9"}'.encode("utf-8"), id="not-ascii"),
+    ],
+)
+def test_plug_report_that_does_not_match_is_refused(report: bytes) -> None:
+    detail = _report_refusal(report)
+    assert detail == "PLUG_REJECTED: the plug's report does not match the delivered files"
+
+
+def test_plug_report_hash_differing_from_the_manifest_is_refused() -> None:
+    report = _report()
+    tampered = report.replace(b'"items":3', b'"items":4')
+    assert len(tampered) == len(report)
+    detail = _report_refusal(report, archive=_member_zip(report=tampered))
+    assert detail == "PLUG_REJECTED: the plug's report did not match its checksum"
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        pytest.param([(p, c) for p, _m, c in MEMBERS], id="report-missing"),
+        pytest.param([(REPORT_PATH, _report())] + [(p, c) for p, _m, c in MEMBERS], id="report-first"),
+        pytest.param([(p, c) for p, _m, c in MEMBERS] + [(REPORT_PATH, _report())] * 2, id="report-twice"),
+    ],
+)
+def test_plug_archive_without_the_report_last_is_refused(entries) -> None:
+    detail = _archive_refusal(_zip(entries))
+    assert detail == "PLUG_REJECTED: the prepared archive does not match its manifest"

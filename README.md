@@ -124,15 +124,15 @@ to the paperclip.
   the study and releases those values. This choice is made in the checker,
   not in this app.
 
-### Contract version 2 (pinned)
+### Contract version 3 (pinned)
 
 Browser and plug page (`postMessage`, exact origin and source window checked
 both ways):
 
-- The app loads `{origin}/embed?thread_id={id}&contract=2`.
+- The app loads `{origin}/embed?thread_id={id}&contract=3`.
 - Plug to app: `{type: "ready"}`, `{type: "done", thread_id, handle}`,
   `{type: "cancel"}`, `{type: "error", code}`; every message carries
-  `contract: "2"`. Codes are `[A-Z_]` only; anything else becomes
+  `contract: "3"`. Codes are `[A-Z_]` only; anything else becomes
   `PLUG_REJECTED`. An `error` on another contract version is shown as a
   contract mismatch.
 - App to plug, after `ready`: `{type: "file", contract, thread_id, caps, file}`.
@@ -140,23 +140,31 @@ both ways):
   `max_total_bytes`, `max_table_rows`, `max_table_columns`, `max_table_cells`.
 - A handle matches `^[A-Za-z0-9_-]{16,128}$`.
 
-App server and plug (`Authorization: Bearer {secret}`, `X-Gate-Contract: 2`,
+App server and plug (`Authorization: Bearer {secret}`, `X-Gate-Contract: 3`,
 query `thread_id`, no redirects, no proxy settings from the environment):
 
 - `GET {url}/v1/deliveries/{handle}` returns
-  `{contract: "2", archive: {size, sha256}, members: [{path, mime, size, sha256}, ...]}`.
+  `{contract: "3", archive: {size, sha256}, members: [{path, mime, size, sha256}, ...], report: {path, mime, size, sha256}}`.
   Each `path` is a role folder and a neutral name: `dataset/dataset_N`,
   `dictionary/dictionary_N`, `forms/form_N` or `metadata/metadata_N`, with
   `.csv`, `.tsv`, `.xlsx`, `.txt`, `.md`, `.json`, `.xml` or `.docx`.
 - Before the archive is fetched, the app checks every path, that file names are
   unique ignoring case, its file count, per-file and total caps, and that
-  `archive.size` is at most `sum(size) + 22 + sum(76 + 2 * len(path))`. A
-  delivery refused here is not spent.
+  `archive.size` is at most `sum(size) + 22 + sum(76 + 2 * len(path))`, the
+  report counted as one more entry. `report` must be `report/report.json`,
+  `application/json`, 1 byte to 64 KiB. A delivery refused here is not spent.
 - `GET {url}/v1/deliveries/{handle}/archive` returns the ZIP, read up to
   `archive.size` and checked against `archive.sha256`.
 - The ZIP's entries must be exactly the manifest's paths (no extra, missing,
   duplicate, directory, absolute, `..` or backslash entry), not encrypted,
-  stored or deflated only, each with its manifest size and sha256. Any failure
+  stored or deflated only, each with its manifest size and sha256, and the
+  report must be the last entry.
+- The report is the checker's per-upload record (codes, counts, neutral paths
+  and hashes; no values or names). The app checks its sha256, that it is ASCII
+  JSON for contract 3, that it lists exactly the manifest's files with their
+  sizes and hashes in manifest order, and that it says the checker's second
+  scan passed with no open item. It is not staged as an attachment and the
+  model does not see it. Any failure
   refuses the whole delivery with a fixed `PLUG_REJECTED` message; a 409 is
   `CONTRACT_MISMATCH`.
 - A delivery can be pulled once.

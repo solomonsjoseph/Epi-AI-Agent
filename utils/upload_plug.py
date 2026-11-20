@@ -26,7 +26,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-CONTRACT_VERSION = "2"
+CONTRACT_VERSION = "3"
 
 PLUG_URL_ENV = "REPORT_AGENT_UPLOAD_PLUG_URL"
 PLUG_SECRET_ENV = "REPORT_AGENT_UPLOAD_PLUG_SECRET"
@@ -66,6 +66,11 @@ _ZIP_ENCRYPTED_FLAG = 0x1
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 _MIN_SECRET_CHARS = 32
 _MAX_MANIFEST_BYTES = 64 * 1024
+# Contract 3: the plug's per-upload report, the archive's last entry. Codes, counts, neutral
+# paths and hashes only. It is checked here and never staged as a chat attachment.
+_REPORT_PATH = "report/report.json"
+_REPORT_MIME = "application/json"
+_MAX_REPORT_BYTES = 64 * 1024
 _READ_CHUNK_BYTES = 1024 * 1024
 
 
@@ -217,7 +222,7 @@ def fetch_delivery(
             manifest = _get_manifest(client, base, headers, params)
             # Every check on the manifest runs before the archive is fetched, so an
             # over-cap or malformed delivery is refused without spending it.
-            archive_size, archive_digest, members = _check_manifest(
+            archive_size, archive_digest, members, report = _check_manifest(
                 manifest,
                 max_files=max_files,
                 max_file_bytes=max_file_bytes,
@@ -228,7 +233,7 @@ def fetch_delivery(
             )
     except httpx.HTTPError as exc:
         raise UploadPlugError("PLUG_UNREACHABLE", "the upload plug could not be reached") from None
-    return _unzip_members(archive, members)
+    return _unzip_members(archive, members, report)
 
 
 def _raise_for_status(response: httpx.Response) -> None:
@@ -252,7 +257,7 @@ def _get_manifest(client: httpx.Client, url: str, headers: dict, params: dict) -
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an unreadable manifest") from None
     if not isinstance(manifest, dict) or manifest.get("contract") != CONTRACT_VERSION:
         raise UploadPlugError("CONTRACT_MISMATCH", "the upload plug uses a different contract version")
-    if set(manifest) != {"contract", "archive", "members"}:
+    if set(manifest) != {"contract", "archive", "members", "report"}:
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid manifest")
     return manifest
 
@@ -263,8 +268,9 @@ def _check_manifest(
     max_files: int,
     max_file_bytes: int,
     max_total_bytes: int,
-) -> tuple[int, str, list[tuple[str, str, str, int, str]]]:
-    """Return the archive size and hash and ``(path, name, mime, size, sha256)`` per member."""
+) -> tuple[int, str, list[tuple[str, str, str, int, str]], tuple[int, str]]:
+    """Return the archive size and hash, ``(path, name, mime, size, sha256)`` per member and the
+    report's ``(size, sha256)``."""
     entries = manifest.get("members")
     if not isinstance(entries, list) or not entries:
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned no files")
@@ -301,6 +307,22 @@ def _check_manifest(
         checked.append((path, name, mime, size, digest))
     _unique_names([name for _path, name, _mime, _size, _digest in checked])
 
+    report = manifest.get("report")
+    if not isinstance(report, dict) or set(report) != {"path", "mime", "size", "sha256"}:
+        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid manifest")
+    report_size = report.get("size")
+    report_digest = report.get("sha256")
+    if (
+        report.get("path") != _REPORT_PATH
+        or report.get("mime") != _REPORT_MIME
+        or isinstance(report_size, bool)
+        or not isinstance(report_size, int)
+        or not 0 < report_size <= _MAX_REPORT_BYTES
+        or not isinstance(report_digest, str)
+        or not _SHA256_RE.fullmatch(report_digest)
+    ):
+        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid report entry")
+
     archive = manifest.get("archive")
     if not isinstance(archive, dict) or set(archive) != {"size", "sha256"}:
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid manifest")
@@ -312,10 +334,10 @@ def _check_manifest(
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid checksum")
     bound = total + _ZIP_END_RECORD_BYTES + sum(
         _ZIP_ENTRY_BYTES + 2 * len(path) for path, _name, _mime, _size, _digest in checked
-    )
+    ) + report_size + _ZIP_ENTRY_BYTES + 2 * len(_REPORT_PATH)
     if archive_size > bound:
         raise UploadPlugError("PLUG_REJECTED", "the prepared archive is larger than its files allow")
-    return archive_size, archive_digest, checked
+    return archive_size, archive_digest, checked, (report_size, report_digest)
 
 
 def _get_archive(
@@ -337,10 +359,12 @@ def _get_archive(
 def _unzip_members(
     archive: bytes,
     members: list[tuple[str, str, str, int, str]],
+    report: tuple[int, str],
 ) -> list[tuple[str, str, bytes]]:
-    """Unzip in memory, all or nothing: the entries must be exactly the manifest's files."""
+    """Unzip in memory, all or nothing: the entries must be exactly the manifest's files and
+    the report. The report is checked and dropped; only the members are returned."""
     try:
-        return _read_members(archive, members)
+        return _read_members(archive, members, report)
     except UploadPlugError:
         raise
     except Exception:
@@ -353,6 +377,7 @@ def _unzip_members(
 def _read_members(
     archive: bytes,
     members: list[tuple[str, str, str, int, str]],
+    report: tuple[int, str],
 ) -> list[tuple[str, str, bytes]]:
     mismatch = UploadPlugError("PLUG_REJECTED", "the prepared archive does not match its manifest")
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
@@ -376,12 +401,17 @@ def _read_members(
                     "PLUG_REJECTED", "the prepared archive uses an unsupported compression method"
                 )
         names = [entry.orig_filename for entry in entries]
-        if len(names) != len(members) or set(names) != {path for path, *_rest in members}:
+        expected = [path for path, *_rest in members] + [_REPORT_PATH]
+        # the report is the last entry; the members come in any order before it
+        if len(names) != len(expected) or set(names) != set(expected) or names[-1] != _REPORT_PATH:
             raise mismatch
         by_path = {entry.orig_filename: entry for entry in entries}
         for path, _name, _mime, size, _digest in members:
             if by_path[path].file_size != size:
                 raise mismatch
+        report_size, report_digest = report
+        if by_path[_REPORT_PATH].file_size != report_size:
+            raise mismatch
         files: list[tuple[str, str, bytes]] = []
         for path, name, mime, size, digest in members:
             with bundle.open(by_path[path]) as handle:
@@ -389,7 +419,33 @@ def _read_members(
             if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
                 raise UploadPlugError("PLUG_REJECTED", "a prepared file did not match its checksum")
             files.append((name, mime, content))
+        with bundle.open(by_path[_REPORT_PATH]) as handle:
+            body = handle.read(report_size + 1)
+    if len(body) != report_size or hashlib.sha256(body).hexdigest() != report_digest:
+        raise UploadPlugError("PLUG_REJECTED", "the plug's report did not match its checksum")
+    _check_report(body, members)
     return files
+
+
+def _check_report(body: bytes, members: list[tuple[str, str, str, int, str]]) -> None:
+    """The report must list exactly the delivered files with their sizes and hashes and say
+    that the plug's second scan passed. Nothing else in it is read or kept."""
+    invalid = UploadPlugError("PLUG_REJECTED", "the plug's report does not match the delivered files")
+    try:
+        report = json.loads(body.decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        raise invalid from None
+    if not isinstance(report, dict) or report.get("contract") != CONTRACT_VERSION:
+        raise invalid
+    if report.get("report_version") != 1:
+        raise invalid
+    listed = report.get("files")
+    want = [{"path": path, "size": size, "sha256": digest} for path, _n, _m, size, digest in members]
+    if not isinstance(listed, list) or listed != want:
+        raise invalid
+    scan = report.get("second_scan")
+    if scan != {"result": "PASS", "files": len(members), "open_items": 0}:
+        raise invalid
 
 
 def _read_capped(response: httpx.Response, cap: int) -> bytes:
