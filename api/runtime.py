@@ -64,7 +64,11 @@ from api.schemas import (
     TablePreview,
 )
 from api.activity_store import SqliteActivityStore
-from api.conversation_history import ConversationHistoryStore, OpenAIConversationTitleGenerator
+from api.conversation_history import (
+    ConversationHistoryStore,
+    OpenAIConversationTitleGenerator,
+    title_from_message,
+)
 from epi_agent.analysis_artifacts import AnalysisRun
 from epi_agent.tool_call_protocol import follow_up_message_patch
 from graph.conversation_events import (
@@ -2158,36 +2162,14 @@ class ReportAgentApiRuntime:
             raise ThreadAlreadyRunningError(thread_id)
         if self.history_store is not None:
             record = self.history_store.get(identity.owner_user_id, thread_id)
-            title_generator = (
-                self.title_generator_factory(thread.settings, provider_api_key or "")
-                if self.title_generator_factory is not None
-                else self.title_generator
-            )
-            if (
-                not thread.locked
-                and record is not None
-                and text.strip()
-                and record.title == "Untitled conversation"
-                and title_generator is not None
-            ):
-                self._title_executor.submit(
-                    self._generate_title,
-                    identity.owner_user_id,
-                    thread_id,
-                    text,
-                    title_generator,
-                    bool(attachment_ids),
-                )
-            elif (
-                not thread.locked
-                and record is not None
-                and not text.strip()
-                and attachment_ids
-            ):
+            if record is not None and text.strip():
+                # "New chat" until the first typed message (a message of files only keeps it), then the
+                # first 10 words of that message; the store replaces only the placeholder of an automatic
+                # title, never a manual rename.
                 self.history_store.set_initial_automatic_title(
                     identity.owner_user_id,
                     thread_id,
-                    ConversationHistoryStore.fallback_title(text),
+                    title_from_message(text),
                 )
         thread.locked = True
 

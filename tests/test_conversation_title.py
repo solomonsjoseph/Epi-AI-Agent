@@ -145,8 +145,9 @@ def test_runtime_passes_only_a_flag_never_file_names(monkeypatch) -> None:
     assert seen["stored"] == "Mean age in the cohort"
 
 
-def _submit_first_message(tmp_path, *, with_file: bool):
-    """Runs the real ReportAgentApiRuntime.submit_message with a fake graph and records the title call."""
+def _submit(tmp_path, messages, *, with_file: bool, rename: str | None = None):
+    """Runs the real ReportAgentApiRuntime.submit_message with a fake graph, once per message, and
+    records every call to the title model (there should be none)."""
     from api.auth import LOCAL_REQUEST_IDENTITY as identity
     from api.runtime import ReportAgentApiRuntime
 
@@ -189,16 +190,43 @@ def _submit_first_message(tmp_path, *, with_file: bool):
             identity, "thread-1", [("study.csv", "text/csv", b"id,age\n1,40\n2,50\n")]
         )
         ids = [a.id for a in staged.attachments]
-    runtime.submit_message(identity, "thread-1", "What is the mean age?", ids)
-    return calls, store.get(identity.owner_user_id, "thread-1")
+    titles = []
+    for i, text in enumerate(messages):
+        runtime.submit_message(identity, "thread-1", text, ids if i == 0 else [])
+        if rename is not None and i == 0:
+            store.rename(identity.owner_user_id, "thread-1", rename)
+        titles.append(store.get(identity.owner_user_id, "thread-1").title)
+    return calls, titles
 
 
-def test_submit_with_a_file_tells_the_title_model_only_that_files_exist(tmp_path) -> None:
-    calls, record = _submit_first_message(tmp_path, with_file=True)
-    assert calls == [("What is the mean age?", {"has_attachments": True})]
-    assert record.title == "Mean age in the cohort"
+def test_a_new_conversation_is_called_new_chat(tmp_path) -> None:
+    store = ConversationHistoryStore(tmp_path / "history.db")
+    record, _created = store.create_pending("owner", "t", model_name="m")
+    assert record.title == "New chat"
 
 
-def test_submit_without_a_file_says_no_files(tmp_path) -> None:
-    calls, _record = _submit_first_message(tmp_path, with_file=False)
-    assert calls == [("What is the mean age?", {"has_attachments": False})]
+def test_the_title_is_the_first_typed_message_and_no_model_writes_it(tmp_path) -> None:
+    for with_file in (True, False):
+        calls, titles = _submit(tmp_path / str(with_file), ["What is the mean age?"], with_file=with_file)
+        assert calls == []  # the title model is never called, with or without files
+        assert titles == ["What is the mean age?"]
+
+
+def test_a_long_first_message_gives_its_first_ten_words(tmp_path) -> None:
+    text = "Please compare the mean systolic blood pressure between men and women at baseline in the cohort"
+    _calls, titles = _submit(tmp_path, [text], with_file=True)
+    assert titles == ["Please compare the mean systolic blood pressure between men and"]
+
+
+def test_a_message_of_files_only_keeps_new_chat_until_the_user_types(tmp_path) -> None:
+    calls, titles = _submit(tmp_path, ["", "How many participants smoke?"], with_file=True)
+    assert calls == []
+    assert titles == ["New chat", "How many participants smoke?"]
+
+
+def test_later_messages_and_a_manual_rename_keep_the_title(tmp_path) -> None:
+    _calls, titles = _submit(tmp_path, ["What is the mean age?", "And the median?"], with_file=False)
+    assert titles == ["What is the mean age?", "What is the mean age?"]
+    _calls, titles = _submit(tmp_path / "r", ["What is the mean age?", "And the median?"], with_file=False,
+                             rename="My cohort")
+    assert titles == ["My cohort", "My cohort"]
