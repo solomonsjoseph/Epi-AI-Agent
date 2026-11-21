@@ -12,6 +12,7 @@ from utils.llm_response import coerce_text_content
 
 
 _UNTITLED = "New chat"
+_LEGACY_UNTITLED = "Untitled conversation"  # the placeholder before 2026-11-21; still replaced
 _ATTACHMENT_ONLY_TITLE = "Attached data analysis"
 _MAX_TITLE_LENGTH = 120
 
@@ -364,8 +365,8 @@ class ConversationHistoryStore:
             connection.execute(
                 "UPDATE conversation_history SET title = ?, updated_at = ? "
                 "WHERE owner_user_id = ? AND thread_id = ? "
-                "AND title = ? AND title_source = 'automatic'",
-                (self._title(title), self._now(), owner_user_id, thread_id, _UNTITLED),
+                "AND title IN (?, ?) AND title_source = 'automatic'",
+                (self._title(title), self._now(), owner_user_id, thread_id, _UNTITLED, _LEGACY_UNTITLED),
             )
         return self.get(owner_user_id, thread_id)
 
@@ -422,12 +423,17 @@ _FIRST_PERSON = re.compile(r"I(?:\s|['\u2019])")
 _REPLY_WORDS = re.compile(r"\b(?:access|cannot|can['\u2019]t)\b", re.IGNORECASE)
 
 
-def title_from_message(first_message: str) -> str:
+def title_from_message(first_message: str) -> str | None:
     """The conversation title: the user's first typed message, cut at a word boundary to at most 10 words.
 
     No model writes the title, so it can never be an answer or a refusal ("I don't have access to the data").
+    None when the message holds no letter or digit (only spaces, punctuation or quotes): the title stays
+    "New chat".
     """
-    return _short_fallback(first_message)
+    if not any(ch.isalnum() for ch in str(first_message or "")):
+        return None
+    title = _short_fallback(first_message)
+    return title if any(ch.isalnum() for ch in title) else None
 
 
 def _short_fallback(first_message: str) -> str:
