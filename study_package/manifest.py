@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 EMBEDDING_MODEL = "OpenAI/text-embedding-3-large"
+BEDROCK_COHERE_EMBEDDING_MODEL = "Bedrock/cohere-embed-v4-1536"
 _SAFE_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
@@ -42,7 +43,7 @@ class DatabaseManifest(_ManifestModel):
     duckdb: str
     catalog: str
     index: str
-    embedding_model: Literal[EMBEDDING_MODEL]
+    embedding_model: Literal[EMBEDDING_MODEL, BEDROCK_COHERE_EMBEDDING_MODEL]
 
     @field_validator("source_id")
     @classmethod
