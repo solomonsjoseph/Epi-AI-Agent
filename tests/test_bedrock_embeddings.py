@@ -3,6 +3,10 @@ from __future__ import annotations
 import io
 import json
 import logging
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 
 import chromadb
 import pytest
@@ -152,6 +156,35 @@ def test_chroma_persists_the_shared_configuration_and_uses_query_mode(tmp_path):
         "search_document",
         "search_query",
     ]
+
+
+def test_fresh_chroma_reader_reconstructs_the_persisted_cohere_configuration(tmp_path):
+    client = chromadb.PersistentClient(path=str(tmp_path / "index"))
+    client.create_collection("example_index", embedding_function=_embedder(None, api_key=""))
+    read_configuration = textwrap.dedent("""\
+        import json
+        import sys
+
+        import chromadb
+        from db_rag.bedrock_embeddings import BedrockCohereEmbeddingFunction
+
+        collection = chromadb.PersistentClient(path=sys.argv[1]).get_collection("example_index")
+        function = collection.configuration["embedding_function"]
+        assert isinstance(function, BedrockCohereEmbeddingFunction)
+        print(json.dumps(function.get_config()))
+        """)
+
+    result = subprocess.run(
+        [sys.executable, "-c", read_configuration, str(tmp_path / "index")],
+        cwd=Path(__file__).resolve().parents[1],
+        env={"AWS_EC2_METADATA_DISABLED": "true"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"model_name": MODEL, "region_name": REGION, "dimensions": DIMENSIONS}
 
 
 def test_model_versions_allow_one_numeric_suffix_without_changing_other_identifiers():

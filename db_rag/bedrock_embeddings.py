@@ -5,6 +5,7 @@ import json
 from typing import Any, Literal
 
 from chromadb.api.types import Documents, EmbeddingFunction
+from chromadb.utils.embedding_functions import register_embedding_function
 import numpy as np
 
 from utils.performance import timing_stage
@@ -18,6 +19,7 @@ _MAX_BATCH_SIZE = 96
 _FLOAT32_MAX = float(np.finfo(np.float32).max)
 
 
+@register_embedding_function
 class BedrockCohereEmbeddingFunction(EmbeddingFunction[Documents]):
     def __init__(
         self,
