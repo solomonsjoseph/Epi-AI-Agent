@@ -245,3 +245,11 @@ def test_an_old_untitled_conversation_row_is_named_by_the_typed_message(tmp_path
         connection.execute("UPDATE conversation_history SET title = 'Untitled conversation'")
     store.set_initial_automatic_title("owner", "t", "Mean age by sex")
     assert store.get("owner", "t").title == "Mean age by sex"
+
+
+def test_a_manual_title_that_reads_untitled_conversation_is_kept(tmp_path) -> None:
+    store = ConversationHistoryStore(tmp_path / "history.db")
+    store.create_pending("owner", "t", model_name="m")
+    store.rename("owner", "t", "Untitled conversation")
+    store.set_initial_automatic_title("owner", "t", "Mean age by sex")
+    assert store.get("owner", "t").title == "Untitled conversation"
