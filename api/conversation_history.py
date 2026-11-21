@@ -11,7 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from utils.llm_response import coerce_text_content
 
 
-_UNTITLED = "Untitled conversation"
+_UNTITLED = "New chat"
 _ATTACHMENT_ONLY_TITLE = "Attached data analysis"
 _MAX_TITLE_LENGTH = 120
 
@@ -420,6 +420,14 @@ _MAX_TITLE_WORDS = 10
 # "I ...", "I'm ...", "I'd ..." (straight or curly apostrophe).
 _FIRST_PERSON = re.compile(r"I(?:\s|['\u2019])")
 _REPLY_WORDS = re.compile(r"\b(?:access|cannot|can['\u2019]t)\b", re.IGNORECASE)
+
+
+def title_from_message(first_message: str) -> str:
+    """The conversation title: the user's first typed message, cut at a word boundary to at most 10 words.
+
+    No model writes the title, so it can never be an answer or a refusal ("I don't have access to the data").
+    """
+    return _short_fallback(first_message)
 
 
 def _short_fallback(first_message: str) -> str:
