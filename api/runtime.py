@@ -2162,14 +2162,15 @@ class ReportAgentApiRuntime:
             raise ThreadAlreadyRunningError(thread_id)
         if self.history_store is not None:
             record = self.history_store.get(identity.owner_user_id, thread_id)
-            if record is not None and text.strip():
+            title = title_from_message(text) if record is not None else None
+            if title is not None:
                 # "New chat" until the first typed message (a message of files only keeps it), then the
                 # first 10 words of that message; the store replaces only the placeholder of an automatic
                 # title, never a manual rename.
                 self.history_store.set_initial_automatic_title(
                     identity.owner_user_id,
                     thread_id,
-                    title_from_message(text),
+                    title,
                 )
         thread.locked = True
 

@@ -230,3 +230,18 @@ def test_later_messages_and_a_manual_rename_keep_the_title(tmp_path) -> None:
     _calls, titles = _submit(tmp_path / "r", ["What is the mean age?", "And the median?"], with_file=False,
                              rename="My cohort")
     assert titles == ["My cohort", "My cohort"]
+
+
+def test_a_message_of_only_punctuation_keeps_new_chat(tmp_path) -> None:
+    calls, titles = _submit(tmp_path, [";", "  .  ", "Mean age by sex"], with_file=False)
+    assert calls == []
+    assert titles == ["New chat", "New chat", "Mean age by sex"]
+
+
+def test_an_old_untitled_conversation_row_is_named_by_the_typed_message(tmp_path) -> None:
+    store = ConversationHistoryStore(tmp_path / "history.db")
+    store.create_pending("owner", "t", model_name="m")
+    with store._connect() as connection:
+        connection.execute("UPDATE conversation_history SET title = 'Untitled conversation'")
+    store.set_initial_automatic_title("owner", "t", "Mean age by sex")
+    assert store.get("owner", "t").title == "Mean age by sex"
