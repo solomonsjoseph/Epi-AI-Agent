@@ -213,6 +213,7 @@ def validate_extraction_sql(
     approved_tables: list[str],
     approved_columns: list[dict[str, Any]],
     database_path: str | Path,
+    approved_output_columns: list[dict[str, Any]] | None = None,
 ) -> ValidatedExtractionSql:
     # This entry point owns parsing and reuses the trees for structural checks.
     issues = sql_validation_issues(sql, check_syntax=False)
@@ -251,6 +252,19 @@ def validate_extraction_sql(
             issues.extend(_approved_schema_issues(
                 expression, approved_tables=approved_tables, approved_columns=approved_columns,
             ))
+            if approved_output_columns is not None and not issues:
+                from .output_validation import approved_output_issues
+
+                issues.extend(approved_output_issues(
+                    expression,
+                    reference_columns=approved_columns,
+                    output_columns=approved_output_columns,
+                ))
+            elif approved_output_columns is not None:
+                skipped.append({
+                    "check": "approved_output",
+                    "reason": "Output lineage requires SQL to pass policy and schema checks.",
+                })
 
     if issues:
         skipped.append({

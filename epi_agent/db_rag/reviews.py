@@ -807,11 +807,31 @@ class RequestDatasetPlanReviewTool:
                     str(error),
                     recoverable=True,
                 ) from error
+            output_summary = [
+                {
+                    "key": _column_key(field.model_dump(mode="json")),
+                    "output_column": field.output_column or field.column,
+                }
+                for field in [
+                    *candidate.required_fields,
+                    *(field for concept in candidate.concepts for field in concept.fields),
+                ]
+            ]
+            selected_output_keys = {field["key"] for field in output_summary}
+            excluded_keys = sorted({
+                _column_key(field.model_dump(mode="json"))
+                for concept in plan.concepts
+                for field in concept.fields
+            } - selected_output_keys)
             return ToolResult(
                 message=(
                     f"Dataset plan review action=approve "
                     f"plan_id={reference.id} version={reference.version} "
-                    "status=approved."
+                    "status=approved. "
+                    f"Frozen approved output fields: {json.dumps(output_summary)}. "
+                    f"Excluded field keys: {json.dumps(excluded_keys)}. "
+                    "Generate SQL only for these outputs; do not restore "
+                    "unchecked variables from the earlier goal or operation references."
                 ),
                 artifacts=(reference,),
             )

@@ -2701,6 +2701,7 @@ def _validate_and_extract(
             sql=attempted_sql,
             approved_tables=tables,
             approved_columns=reference_columns,
+            approved_output_columns=columns,
             database_path=runtime_path,
         )
     except (KeyError, ValueError) as error:
@@ -2711,16 +2712,19 @@ def _validate_and_extract(
                 "frozen approved plan."
             ),
             recoverable=True,
-            details=_sql_repair_details(
-                plan_id=plan_id,
-                plan_version=plan_version,
-                origin=origin,
-                stage="validation",
-                attempted_sql=attempted_sql,
-                error=error,
-                tables=tables,
-                columns=reference_columns,
-            ),
+            details={
+                **_sql_repair_details(
+                    plan_id=plan_id,
+                    plan_version=plan_version,
+                    origin=origin,
+                    stage="validation",
+                    attempted_sql=attempted_sql,
+                    error=error,
+                    tables=tables,
+                    columns=reference_columns,
+                ),
+                "allowed_output_columns": columns,
+            },
         ) from error
     sql_artifact = _validated_sql_artifact(
         context,
