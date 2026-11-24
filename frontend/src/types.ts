@@ -439,6 +439,7 @@ export type ResumeInterruptPayload =
       action: "revise";
       feedback: string;
       selected_column_keys?: string[];
+      review_concept_id?: string;
     }
   | { action: "cancel" }
   | { action: "continue" }

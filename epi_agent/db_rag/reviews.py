@@ -779,6 +779,12 @@ class RequestDatasetPlanReviewTool:
                 recoverable=True,
             )
 
+        scope = decision.get("review_concept_id")
+        scoped_concept = None
+        if "review_concept_id" in decision:
+            scoped_concept = next((concept for concept in plan.concepts if concept.concept_id == str(scope or "").strip()), None)
+            if action != "revise" or scoped_concept is None:
+                raise ToolExecutionError("REVIEW_DECISION_INVALID", "Revision concept must belong to the active plan review.", recoverable=True)
         selected = decision.get("selected_column_keys")
         selected_keys = list(selected) if isinstance(selected, list) else None
         candidate = _selected_plan(
@@ -843,6 +849,20 @@ class RequestDatasetPlanReviewTool:
                 "Semantic dataset-plan revision requires human feedback.",
                 recoverable=True,
             )
+        selected_keys_for_revision = sorted({
+            _column_key(field.model_dump(mode="json"))
+            for concept in candidate.concepts for field in concept.fields
+        })
+        original_keys = {
+            _column_key(field.model_dump(mode="json"))
+            for concept in plan.concepts for field in concept.fields
+        }
+        review_context = {
+            "concept_id": scoped_concept.concept_id if scoped_concept else None,
+            "concept_label": scoped_concept.label if scoped_concept else None,
+            "selected_column_keys": selected_keys_for_revision,
+            "excluded_column_keys": sorted(original_keys - set(selected_keys_for_revision)),
+        }
         reference = context.artifact_store.save_dataset_plan(
             candidate,
             status="draft",
@@ -854,6 +874,7 @@ class RequestDatasetPlanReviewTool:
                 "producer": "dbrag-request_dataset_plan_review",
                 "review_action": "revise",
                 "review_feedback": feedback,
+                "review_context": review_context,
             },
         )
         return ToolResult(
@@ -862,7 +883,11 @@ class RequestDatasetPlanReviewTool:
                 f'Feedback: "{feedback}" '
                 f"prior_plan_id={plan_id} prior_version={version} "
                 f"plan_id={reference.id} version={reference.version} "
-                "status=draft."
+                "status=draft. "
+                f"Review context: {json.dumps(review_context, sort_keys=True)}. "
+                "Use the scoped concept to resolve references such as 'this'. "
+                "Honor checkbox exclusions. Checked fields describe the current "
+                "draft and do not override changes requested in the feedback."
             ),
             artifacts=(reference,),
             conversation_review_decision={

@@ -130,6 +130,9 @@ export default function DbRagReview({
       action: "revise",
       feedback: trimmed,
       selected_column_keys: approvedKeys,
+      ...(activeMode === "step" && currentGroup
+        ? { review_concept_id: currentGroup.concept_id }
+        : {}),
     });
   }
 

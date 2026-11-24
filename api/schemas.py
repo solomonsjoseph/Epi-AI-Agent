@@ -530,6 +530,7 @@ class ResumeInterruptRequest(BaseModel):
 
     action: Literal["approve", "revise", "cancel", "answer", "continue"]
     selected_column_keys: list[str] | None = None
+    review_concept_id: str | None = Field(default=None, min_length=1, max_length=500)
     feedback: str | None = None
     answer: str | None = None
 
@@ -541,6 +542,12 @@ class ResumeInterruptRequest(BaseModel):
                 raise ValueError("feedback is required for revise")
         elif self.feedback is not None:
             raise ValueError("feedback is accepted only for revise")
+        if self.review_concept_id is not None:
+            if self.action != "revise":
+                raise ValueError("review_concept_id is accepted only for revise")
+            self.review_concept_id = self.review_concept_id.strip()
+            if not self.review_concept_id:
+                raise ValueError("review_concept_id cannot be blank")
         if self.action == "answer":
             self.answer = str(self.answer or "").strip()
             if not self.answer:

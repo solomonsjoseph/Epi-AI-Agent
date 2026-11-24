@@ -55,3 +55,24 @@ describe("concept selection navigation", () => {
     expect(screen.getByRole("button", { name: "Approve & continue" })).toBeDisabled();
   });
 });
+
+describe("revision scope", () => {
+  it("sends the current concept with vague feedback and checkbox exclusions", () => {
+    const onDecision = vi.fn();
+    render(<DbRagReview interrupt={review()} onDecision={onDecision} />);
+    fireEvent.click(screen.getByRole("button", { name: "Approve & continue" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "participants · sex" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Revision feedback" }), { target: { value: "don't choose this" } });
+    fireEvent.click(screen.getByRole("button", { name: "Request revision" }));
+    expect(onDecision).toHaveBeenCalledWith({ action: "revise", feedback: "don't choose this", review_concept_id: "sex", selected_column_keys: ["source::participants::age", "source::participants::race"] });
+  });
+
+  it("does not invent a current concept when all concepts are displayed", () => {
+    const onDecision = vi.fn();
+    render(<DbRagReview interrupt={review()} onDecision={onDecision} />);
+    fireEvent.click(screen.getByRole("button", { name: "All concepts" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Revision feedback" }), { target: { value: "Remove sex" } });
+    fireEvent.click(screen.getByRole("button", { name: "Request revision" }));
+    expect(onDecision.mock.calls[0][0]).not.toHaveProperty("review_concept_id");
+  });
+});

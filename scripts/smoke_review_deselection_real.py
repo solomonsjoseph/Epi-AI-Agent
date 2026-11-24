@@ -73,13 +73,15 @@ def main(*, scenario='deselection'):
         response.raise_for_status()
         return response.json()
 
-    def wait_for(kind):
+    def wait_for(kind, *, prior_interrupt_id=None):
         while time.monotonic() < deadline:
             state = api(f'/api/threads/{thread}/state')
             save('latest-state.json', state)
             interrupt = state.get('active_interrupt') or {}
-            if interrupt.get('type') == kind:
+            if interrupt.get('type') == kind and interrupt.get('id') != prior_interrupt_id:
                 return state
+            if prior_interrupt_id and interrupt.get('type') == 'agent_clarification':
+                raise AssertionError(f'Clear scoped feedback unexpectedly requested clarification: {interrupt}')
             if state.get('run', {}).get('state') == 'error':
                 raise AssertionError(state)
             page.wait_for_timeout(300)
@@ -127,6 +129,17 @@ def main(*, scenario='deselection'):
                         assert review['model_name'] == args.model, review['model_name']
                     save('initial-review.json', review)
                     excluded_column = 'RIAGENDR'
+                    if scenario == 'revision_scope':
+                        group = review['active_interrupt']['view']['concept_groups'][0]
+                        assert len(group['columns']) == 1
+                        excluded_column = group['columns'][0]['column']
+                        page.get_by_role('textbox', name='Revision feedback', exact=True).fill("don't choose this")
+                        page.get_by_role('button', name='Request revision', exact=True).click()
+                        revised_review = wait_for('dataset_plan_review', prior_interrupt_id=review['active_interrupt']['id'])
+                        save('revised-review.json', revised_review)
+                        revised_columns = [column['column'] for concept in revised_review['active_interrupt']['view']['concept_groups'] for column in concept['columns']]
+                        assert excluded_column not in revised_columns, revised_columns
+                        result['scoped_concept_id'] = group['concept_id']
                     if scenario == 'concept_skip':
                         group = review['active_interrupt']['view']['concept_groups'][0]
                         assert len(group['columns']) == 1 and len(review['active_interrupt']['view']['concept_groups']) > 1
@@ -139,9 +152,12 @@ def main(*, scenario='deselection'):
                         assert not page.get_by_role('checkbox', name=checkbox_name, exact=True).is_checked()
                     page.get_by_role('button', name='All concepts', exact=True).click()
                     excluded = page.get_by_role('checkbox', name=f'DEMO_J · {excluded_column}', exact=True)
-                    if scenario != 'concept_skip':
+                    if scenario == 'revision_scope':
+                        assert excluded.count() == 0
+                    elif scenario != 'concept_skip':
                         excluded.uncheck()
-                    assert not excluded.is_checked()
+                    if scenario != 'revision_scope':
+                        assert not excluded.is_checked()
                     page.get_by_role('button', name='Approve plan and extract', exact=True).click()
                     dataset_state = wait_for('dataset_review')
                     save('dataset-review.json', dataset_state)

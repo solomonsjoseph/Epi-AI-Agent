@@ -59,13 +59,13 @@ Files: `frontend/src/types.ts`, `frontend/src/DbRagReview.tsx`,
 `api/schemas.py`, `utils/review_interrupts.py`, `epi_agent/db_rag/reviews.py`,
 `epi_agent/db_rag/prompt.py`, associated tests and dedicated smoke.
 
-- [ ] Add failing contract/component/tool tests for active-concept feedback,
+- [x] Add failing contract/component/tool tests for active-concept feedback,
   selected/excluded differences, invalid concept IDs, and legacy no-scope calls.
-- [ ] Carry optional `review_concept_id` on revise only; validate membership.
-- [ ] Include explicit scope and selection differences in revision provenance
+- [x] Carry optional `review_concept_id` on revise only; validate membership.
+- [x] Include explicit scope and selection differences in revision provenance
   and tool messages. Instruct the agent to honor selections before asking
   additional scientific questions; do not guess unspecified scientific intent.
-- [ ] Build and refresh manifest, run focused tests, and smoke once.
+- [x] Build and refresh manifest, run focused tests, and smoke once.
 
 ## Task 4: Handle all-zero approval and revision
 
@@ -145,3 +145,17 @@ Evidence: `/private/tmp/epi-review-concept-skip-bedrock-20261124/`.
 The smoke now asserts the excluded field stays unchecked after switching modes
 instead of redundantly unchecking it; component coverage already verifies mode
 switching. No real smoke was rerun automatically.
+
+## Third-fix checkpoint
+
+Four backend regressions and one UI regression failed before implementation.
+After implementation, **35 focused backend tests and 5 component tests pass**,
+with an independent read-only code review finding no substantive issues.
+Frontend build and manifest checks pass.
+
+Dedicated scoped-feedback browser result: **PASS**, 22.6 seconds on the same
+real Bedrock model/embeddings. While the age checkbox was still selected, the
+browser submitted exactly `don't choose this` in step-by-step review. The agent
+returned a revised plan excluding age without asking another scientific/model
+clarification, then extracted `SEQN`, `RIAGENDR`, `RIDRETH3` after approval.
+Evidence: `/private/tmp/epi-review-revision-scope-bedrock-20261124/`.
