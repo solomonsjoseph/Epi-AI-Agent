@@ -30,3 +30,8 @@ Alternatives considered: changing only the navigation button leaves the
 observed extraction failure intact; handling checkbox changes only through
 natural language adds ambiguity and model turns. The approved approach fixes
 the existing structured review contract at each boundary.
+
+User-requested UI refinement: display the zero-selection warning in bold red.
+Disable and grey out Request revision when trimmed feedback is empty, in both
+step-by-step and all-concepts modes. Keep revision usable with valid feedback
+even when no variables are selected, and retain the in-flight disabled state.

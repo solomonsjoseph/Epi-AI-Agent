@@ -192,3 +192,30 @@ Evidence: `/private/tmp/epi-review-yaoan-three-table-20261124.json`.
 
 All four changes remain on `codex/dataset-plan-review-fixes`. No production
 deployment, primary-checkout integration, or user-history changes were made.
+
+## Requested warning and revision-button refinement
+
+- [x] Add failing component coverage for empty/whitespace feedback, both modes,
+  mode switching, clearing feedback, and the in-flight disable condition.
+- [x] Add a warning class using the existing error red and bold font weight.
+  Disable Request revision when `disabled || !feedback.trim()`.
+- [x] Rebuild the tracked frontend, refresh its manifest, and run the component
+  tests. Use actual browser computed styles to verify red/bold and grey states.
+- [x] Run the dedicated `scripts/smoke_review_feedback_controls_real.py` once
+  with real Bedrock OpenAI, real Cohere embeddings and compiled frontend. Check
+  blank/whitespace/valid feedback in both modes, warning styling after clearing
+  all fields, and successful extraction after restoring a valid selection.
+- [x] Review, preserve test artifacts, and commit the local refinement.
+
+Baseline 7 component tests passed. Four regressions failed before the button
+change; all **11 component tests pass** afterward. Frontend build, delivery
+manifest, independent code review, and `git diff --check` pass.
+
+The dedicated real Bedrock browser check **passed once in 20.0 seconds**.
+Computed styles in both modes confirmed warning color `rgb(207, 34, 46)` and
+font weight `700`, with disabled revision background `rgb(234, 238, 242)`.
+Blank and whitespace-only feedback disabled revision; nonempty feedback enabled
+it even with no selected variables. Clearing feedback disabled it again.
+After restoring age/race selections, extraction saved `SEQN`, `RIDAGEYR`,
+`RIDRETH3` and excluded sex. Evidence and screenshot:
+`/private/tmp/epi-review-feedback-controls-bedrock-20261124/`.

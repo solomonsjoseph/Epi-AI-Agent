@@ -2141,6 +2141,11 @@ select {
   font-weight: 400;
 }
 
+.db-rag-selection-warning {
+  color: #cf222e;
+  font-weight: 700;
+}
+
 .db-rag-review-actions {
   display: flex;
   flex-wrap: wrap;

@@ -41,3 +41,13 @@ identities, and logs remain under:
 This delivery is local to the preserved development branch. It has not been
 deployed or merged into the primary checkout. Existing CTE/window persistence
 metadata limitations are outside this selection-review change.
+
+The follow-up UI refinement also passed its own real Bedrock browser check
+once (20.0 seconds), with **11 component tests passing**. In both review modes,
+the empty-selection warning rendered bold red; Request revision rendered grey
+and disabled for blank or whitespace-only feedback, enabled for nonempty
+feedback, and disabled again after clearing it. Revision remained available
+with meaningful feedback and zero selected fields. The production bundle and
+manifest were rebuilt and verified. Evidence, including the screenshot
+`warning-and-disabled-revision.png`, is in
+`/private/tmp/epi-review-feedback-controls-bedrock-20261124/`.

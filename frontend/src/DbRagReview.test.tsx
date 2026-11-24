@@ -95,15 +95,58 @@ describe("zero selections", () => {
     expect(onDecision).toHaveBeenCalledWith({ action: "revise", feedback: "Use marital status instead", selected_column_keys: [] });
   });
 
-  it("requires feedback for empty revision and restores approval when a variable is selected", () => {
+  it("disables empty revision and restores approval when a variable is selected", () => {
     const onDecision = vi.fn();
     render(<DbRagReview interrupt={review()} onDecision={onDecision} />);
     clearAll();
-    fireEvent.click(screen.getByRole("button", { name: "Request revision" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("Please enter revision feedback.");
+    expect(screen.getByRole("button", { name: "Request revision" })).toBeDisabled();
     expect(onDecision).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("checkbox", { name: "participants · age" }));
     expect(screen.getByRole("button", { name: "Approve plan and extract" })).toBeEnabled();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+});
+
+describe("revision feedback availability", () => {
+  it.each(["step", "all"] as const)("requires non-whitespace feedback in %s mode", (mode) => {
+    const onDecision = vi.fn();
+    render(<DbRagReview interrupt={review()} onDecision={onDecision} reviewMode={mode} />);
+    const feedback = screen.getByRole("textbox", { name: "Revision feedback" });
+    const revise = screen.getByRole("button", { name: "Request revision" });
+    expect(revise).toBeDisabled();
+    fireEvent.change(feedback, { target: { value: " \n\t " } });
+    expect(revise).toBeDisabled();
+    fireEvent.click(revise);
+    expect(onDecision).not.toHaveBeenCalled();
+    fireEvent.change(feedback, { target: { value: "  Remove age  " } });
+    expect(revise).toBeEnabled();
+    fireEvent.click(revise);
+    expect(onDecision.mock.calls[0][0].feedback).toBe("Remove age");
+    fireEvent.change(feedback, { target: { value: "" } });
+    expect(revise).toBeDisabled();
+  });
+
+  it("preserves feedback availability across review-mode changes", () => {
+    render(<DbRagReview interrupt={review()} onDecision={vi.fn()} />);
+    const feedback = screen.getByRole("textbox", { name: "Revision feedback" });
+    expect(screen.getByRole("button", { name: "Request revision" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "All concepts" }));
+    expect(screen.getByRole("button", { name: "Request revision" })).toBeDisabled();
+    fireEvent.change(feedback, { target: { value: "Remove age" } });
+    expect(screen.getByRole("button", { name: "Request revision" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Step by step" }));
+    expect(screen.getByRole("button", { name: "Request revision" })).toBeEnabled();
+    fireEvent.change(feedback, { target: { value: "   " } });
+    expect(screen.getByRole("button", { name: "Request revision" })).toBeDisabled();
+  });
+
+  it("keeps revision disabled during submission even with feedback", () => {
+    const interrupt = review();
+    const onDecision = vi.fn();
+    const { rerender } = render(<DbRagReview interrupt={interrupt} onDecision={onDecision} />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Revision feedback" }), { target: { value: "Remove age" } });
+    expect(screen.getByRole("button", { name: "Request revision" })).toBeEnabled();
+    rerender(<DbRagReview disabled interrupt={interrupt} onDecision={onDecision} />);
+    expect(screen.getByRole("button", { name: "Request revision" })).toBeDisabled();
   });
 });

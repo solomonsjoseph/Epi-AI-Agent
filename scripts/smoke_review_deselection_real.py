@@ -130,6 +130,45 @@ def main(*, scenario='deselection'):
                     save('initial-review.json', review)
                     excluded_column = 'RIAGENDR'
                     excluded_columns = [excluded_column]
+                    if scenario == 'feedback_controls':
+                        revision = page.get_by_role('button', name='Request revision', exact=True)
+                        feedback = page.get_by_role('textbox', name='Revision feedback', exact=True)
+                        result['feedback_controls'] = {}
+                        for mode in ['Step by step', 'All concepts']:
+                            page.get_by_role('button', name=mode, exact=True).click()
+                            assert revision.is_disabled()
+                            grey = revision.evaluate('(element) => getComputedStyle(element).backgroundColor')
+                            assert grey == 'rgb(234, 238, 242)', grey
+                            feedback.fill(' \n\t ')
+                            assert revision.is_disabled()
+                            feedback.fill('Remove age')
+                            assert revision.is_enabled()
+                            feedback.fill('')
+                            assert revision.is_disabled()
+                            result['feedback_controls'][mode] = {'blank_disabled': True, 'whitespace_disabled': True, 'valid_enabled': True, 'disabled_background': grey}
+                        for checkbox in page.get_by_role('checkbox').all():
+                            checkbox.uncheck()
+                        result['warning_styles'] = {}
+                        for mode in ['Step by step', 'All concepts']:
+                            page.get_by_role('button', name=mode, exact=True).click()
+                            warning = page.get_by_role('status').filter(has_text='Select at least one variable')
+                            assert warning.is_visible()
+                            style = warning.evaluate('(element) => ({color: getComputedStyle(element).color, fontWeight: getComputedStyle(element).fontWeight})')
+                            assert style['color'] == 'rgb(207, 34, 46)', style
+                            assert int(style['fontWeight']) >= 700, style
+                            assert revision.is_disabled()
+                            feedback.fill('Use marital status instead')
+                            assert revision.is_enabled()
+                            feedback.fill('')
+                            result['warning_styles'][mode] = style
+                        page.screenshot(path=str(artifacts / 'warning-and-disabled-revision.png'), full_page=True)
+                        unchanged = api(f'/api/threads/{thread}/state')
+                        assert unchanged['active_interrupt']['id'] == review['active_interrupt']['id']
+                        for group in review['active_interrupt']['view']['concept_groups']:
+                            for column in group['columns']:
+                                if column['column'] != excluded_column:
+                                    page.get_by_role('checkbox', name=f"{column['table']} · {column['column']}", exact=True).check()
+                        assert page.get_by_role('status').filter(has_text='Select at least one variable').count() == 0
                     if scenario == 'empty_selection':
                         excluded_columns = [column['column'] for group in review['active_interrupt']['view']['concept_groups'] for column in group['columns']]
                         excluded_column = excluded_columns[0]
@@ -138,8 +177,7 @@ def main(*, scenario='deselection'):
                             checkbox.uncheck()
                         assert page.get_by_role('button', name='Approve plan and extract', exact=True).is_disabled()
                         assert 'Select at least one variable' in page.get_by_role('status').inner_text()
-                        page.get_by_role('button', name='Request revision', exact=True).click()
-                        assert 'Please enter revision feedback' in page.get_by_role('alert').inner_text()
+                        assert page.get_by_role('button', name='Request revision', exact=True).is_disabled()
                         initial_id = review['active_interrupt']['id']
                         response = requests.post(f'{url}/api/threads/{thread}/interrupts/{initial_id}/resume', json={'action': 'approve', 'selected_column_keys': []}, timeout=5)
                         assert response.status_code == 422, response.text

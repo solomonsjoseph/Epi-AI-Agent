@@ -246,7 +246,7 @@ export default function DbRagReview({
       </label>
       {feedbackError ? <p role="alert">{feedbackError}</p> : null}
       {approvedKeys.length === 0 ? (
-        <p role="status">
+        <p className="db-rag-selection-warning" role="status">
           Select at least one variable to extract a dataset. You can request a
           revision with feedback or cancel this review.
         </p>
@@ -293,7 +293,7 @@ export default function DbRagReview({
         )}
         <button
           className="review-action-primary"
-          disabled={disabled}
+          disabled={disabled || !feedback.trim()}
           onClick={revise}
           type="button"
         >
