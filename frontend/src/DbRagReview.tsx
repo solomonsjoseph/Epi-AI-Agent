@@ -34,15 +34,6 @@ function columnLabel(column: {
   return `${column.table} · ${column.column}`;
 }
 
-function selectableKeys(group: ReviewGroup): string[] {
-  return group.columns
-    .filter(
-      (column) =>
-        column.roles.length === 1 && column.roles[0] === "requested",
-    )
-    .map((column) => column.key);
-}
-
 export default function DbRagReview({
   disabled = false,
   interrupt,
@@ -280,13 +271,7 @@ export default function DbRagReview({
         ) : (
           <button
             className="review-action-primary"
-            disabled={
-              disabled ||
-              (selectableKeys(currentGroup).length > 0 &&
-                selectableKeys(currentGroup).every(
-                  (key) => !selectedKeys.has(key),
-                ))
-            }
+            disabled={disabled}
             onClick={() =>
               setConceptIndex((current) =>
                 nextConceptIndex(current, groups.length),

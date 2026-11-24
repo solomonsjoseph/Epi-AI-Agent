@@ -25,11 +25,13 @@ from epi_agent.artifacts import StateArtifactStore
 from utils.env_loader import load_app_environment
 
 
-def main():
+def main(*, scenario='deselection'):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--artifact-dir', type=Path, required=True)
     parser.add_argument('--environment-root', type=Path, required=True)
     parser.add_argument('--model', help='Exact real model ID to select through the browser before sending the query.')
+    parser.add_argument('--study-root', type=Path, help='Prepared real study installation root.')
+    parser.add_argument('--embedding-profile', help='Real embedding profile matching the installed packages.')
     args = parser.parse_args()
     artifacts = args.artifact_dir.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -40,6 +42,15 @@ def main():
     deadline = started + 295
     load_app_environment(args.environment_root)
     environment = dict(os.environ)
+    if args.model and args.model.startswith('bedrock:'):
+        # Keep chat, title generation, and retrieval on the requested provider.
+        # This configures the isolated child only; it does not edit credentials.
+        environment.pop('OPENAI_API_KEY', None)
+        environment.pop('ANTHROPIC_API_KEY', None)
+    if args.study_root:
+        environment['REPORT_AGENT_STUDY_ROOT'] = str(args.study_root.resolve())
+    if args.embedding_profile:
+        environment['DB_RAG_EMBEDDING_PROFILE'] = args.embedding_profile
     checkpoint = artifacts / 'runtime/checkpoints.db'
     environment.update(REPORT_AGENT_RUNTIME_ROOT=str(artifacts / 'runtime'), REPORT_AGENT_CHECKPOINT_DB_PATH=str(checkpoint), REPORT_AGENT_STATIC_DIR=str(ROOT / 'frontend/dist'), PYTHONPATH=str(ROOT))
     with socket.socket() as sock:
@@ -49,7 +60,7 @@ def main():
     process = None
     page = None
     thread = None
-    result = {'status': 'running', 'mode': 'deselection', 'provider_stubs': False}
+    result = {'status': 'running', 'mode': scenario, 'provider_stubs': False}
 
     def timeout(*_):
         raise TimeoutError('Five-minute feature smoke deadline reached')
@@ -92,11 +103,17 @@ def main():
                 try:
                     page = browser.new_page()
                     page.goto(url, wait_until='networkidle')
+                    options = api('/api/runtime/options')
+                    save('runtime-options.json', options)
+                    if args.embedding_profile:
+                        embedding = options['embedding_startup_status']
+                        assert embedding['available'], embedding
+                        assert embedding['profile_id'] == args.embedding_profile, embedding
                     if args.model:
                         page.get_by_label('Model', exact=True).select_option(args.model)
                         result['requested_model'] = args.model
                     field = page.get_by_label('Ask a question about your dataset!')
-                    field.fill('Create a participant-level dataset from study_id nhanes-2017-2018 containing age RIDAGEYR, sex RIAGENDR, and race/ethnicity RIDRETH3 from DEMO_J. Use SEQN as the participant identifier. No filters or statistical analysis. Present the dataset plan for human review before extraction.')
+                    field.fill('Create a participant-level dataset from study_id nhanes-2017-2018 containing age RIDAGEYR, sex RIAGENDR, and race/ethnicity RIDRETH3 from DEMO_J. Put each variable in a separate review concept. Use SEQN as the participant identifier. No filters or statistical analysis. Present the dataset plan for human review before extraction.')
                     page.get_by_role('button', name='Send', exact=True).click()
                     while time.monotonic() < deadline:
                         items = api('/api/conversations')['items']
@@ -106,11 +123,25 @@ def main():
                         page.wait_for_timeout(200)
                     assert thread
                     review = wait_for('dataset_plan_review')
+                    if args.model:
+                        assert review['model_name'] == args.model, review['model_name']
                     save('initial-review.json', review)
+                    excluded_column = 'RIAGENDR'
+                    if scenario == 'concept_skip':
+                        group = review['active_interrupt']['view']['concept_groups'][0]
+                        assert len(group['columns']) == 1 and len(review['active_interrupt']['view']['concept_groups']) > 1
+                        excluded_column = group['columns'][0]['column']
+                        checkbox_name = f"{group['columns'][0]['table']} · {excluded_column}"
+                        page.get_by_role('checkbox', name=checkbox_name, exact=True).uncheck()
+                        assert page.get_by_role('button', name='Approve & continue', exact=True).is_enabled()
+                        page.get_by_role('button', name='Approve & continue', exact=True).click()
+                        page.get_by_role('button', name='Previous concept', exact=True).click()
+                        assert not page.get_by_role('checkbox', name=checkbox_name, exact=True).is_checked()
                     page.get_by_role('button', name='All concepts', exact=True).click()
-                    sex = page.get_by_role('checkbox', name='DEMO_J · RIAGENDR', exact=True)
-                    sex.uncheck()
-                    assert not sex.is_checked()
+                    excluded = page.get_by_role('checkbox', name=f'DEMO_J · {excluded_column}', exact=True)
+                    if scenario != 'concept_skip':
+                        excluded.uncheck()
+                    assert not excluded.is_checked()
                     page.get_by_role('button', name='Approve plan and extract', exact=True).click()
                     dataset_state = wait_for('dataset_review')
                     save('dataset-review.json', dataset_state)
@@ -124,14 +155,14 @@ def main():
                     approved = [item for item in store.list_artifacts(kind='dataset_plan') if item.status == 'approved']
                     assert len(approved) == 1
                     selected = [field for concept in approved[0].content['concepts'] for field in concept['fields']]
-                    assert 'RIAGENDR' not in [field['column'] for field in selected]
+                    assert excluded_column not in [field['column'] for field in selected]
                     datasets = list(state['artifacts']['datasets'].values())
                     assert len(datasets) == 1
                     columns = pd.read_parquet(datasets[0]['path']).columns.tolist()
                     schema = json.loads(Path(datasets[0]['schema_path']).read_text())
-                    assert 'RIAGENDR' not in json.dumps(schema), schema
+                    assert excluded_column not in json.dumps(schema), schema
                     assert len(columns) == len(selected) + len(approved[0].content['required_fields'])
-                    result.update(status='passed', thread_id=thread, output_columns=columns, excluded='DEMO_J.RIAGENDR')
+                    result.update(status='passed', thread_id=thread, output_columns=columns, excluded=f'DEMO_J.{excluded_column}')
                     page.screenshot(path=str(artifacts / 'success.png'), full_page=True)
                 finally:
                     if page:

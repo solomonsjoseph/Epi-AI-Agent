@@ -40,18 +40,18 @@ and `scripts/smoke_review_deselection_real.py`.
   Add output issues to existing structured SQL diagnostics. Pass the frozen
   output list from `_validate_and_extract`; include it in repair details.
 - [x] Explicitly include selected/excluded field keys in approval tool output.
-- [ ] Run focused SQL/review tests and the dedicated browser smoke once.
+- [x] Run focused SQL/review tests and the dedicated browser smoke once.
 
 ## Task 2: Permit empty individual concepts
 
 Files: `frontend/src/DbRagReview.tsx`, new
 `frontend/src/DbRagReview.test.tsx`, `scripts/smoke_review_concept_skip_real.py`.
 
-- [ ] Write a component regression that clears the only field in the first
+- [x] Write a component regression that clears the only field in the first
   concept, continues, returns, and verifies it remains unchecked in approval.
-- [ ] Run `npm --prefix frontend test -- DbRagReview.test.tsx` and observe failure.
-- [ ] Remove the current-concept selection restriction from continuation.
-- [ ] Build and refresh manifest, then verify focused tests and smoke once.
+- [x] Run `npm --prefix frontend test -- DbRagReview.test.tsx` and observe failure.
+- [x] Remove the current-concept selection restriction from continuation.
+- [x] Build and refresh manifest, then verify focused tests and smoke once.
 
 ## Task 3: Preserve revision scope
 
@@ -121,5 +121,27 @@ Limit: positive validator tests for complex CTE/window expressions establish
 output-permission behavior only. Their existing persistence metadata binding
 has independent limitations; this change does not refactor that subsystem.
 
-Tasks 2–4 remain untouched pending resolution of the first fix's live
-verification checkpoint, as requested by the user.
+## Bedrock verification and second-fix checkpoint
+
+The user explicitly authorized another live run using Amazon Bedrock OpenAI.
+Prepared real NHANES 0.4.0 and RePORT 0.5.0 Cohere packages in an isolated study
+root. The child runtime uses Bedrock for chat/title and real Cohere embeddings;
+the primary workspace configuration and credentials are unchanged.
+
+First-fix browser result: **PASS**, 19.8 seconds, model
+`bedrock:openai.gpt-5.6-terra`, embeddings `bedrock-cohere-embed-v4` available.
+Unchecked sex and persisted exactly `SEQN`, `RIDAGEYR`, `RIDRETH3`.
+Evidence: `/private/tmp/epi-review-deselection-bedrock-20261124/`.
+
+Second fix: two component regressions failed before removing the intermediate
+selection restriction; all **3 component tests pass** afterward. The frontend
+was rebuilt and its manifest verified using the existing delivery verifier
+restored from the development checkout. Independent code review passed.
+
+Dedicated concept-skip browser result: **PASS**, 17.3 seconds, same real Bedrock
+model and embeddings. Cleared the only age field, continued, navigated back to
+confirm it stayed unchecked, then persisted `SEQN`, `RIAGENDR`, `RIDRETH3`.
+Evidence: `/private/tmp/epi-review-concept-skip-bedrock-20261124/`.
+The smoke now asserts the excluded field stays unchecked after switching modes
+instead of redundantly unchecking it; component coverage already verifies mode
+switching. No real smoke was rerun automatically.
