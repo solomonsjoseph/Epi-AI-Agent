@@ -72,17 +72,17 @@ Files: `frontend/src/types.ts`, `frontend/src/DbRagReview.tsx`,
 Files: review component, resume normalization, review tool, associated tests,
 and `scripts/smoke_review_empty_selection_real.py`.
 
-- [ ] Add failing tests for disabled empty approval, explanatory text, API
+- [x] Add failing tests for disabled empty approval, explanatory text, API
   rejection retaining the interrupt, and real LangGraph revision with no fields.
-- [ ] Block empty approval visibly and server-side; keep revision/cancel usable.
-- [ ] Process empty-selection revision without validating an empty executable
+- [x] Block empty approval visibly and server-side; keep revision/cancel usable.
+- [x] Process empty-selection revision without validating an empty executable
   plan; save original content plus explicit excluded keys as revision context.
-- [ ] Build and refresh manifest. Verify tests, smoke once, and review final diff.
+- [x] Build and refresh manifest. Verify tests, smoke once, and review final diff.
 
 ## Delivery
 
-- [ ] Record each checkpoint's exact tests and smoke outcome in this file.
-- [ ] Review changes against the approved design. Preserve failed smoke
+- [x] Record each checkpoint's exact tests and smoke outcome in this file.
+- [x] Review changes against the approved design. Preserve failed smoke
   artifacts, if any, and report limitations without claiming a live fix.
 
 ## First-fix verification checkpoint
@@ -159,3 +159,36 @@ browser submitted exactly `don't choose this` in step-by-step review. The agent
 returned a revised plan excluding age without asking another scientific/model
 clarification, then extracted `SEQN`, `RIAGENDR`, `RIDRETH3` after approval.
 Evidence: `/private/tmp/epi-review-revision-scope-bedrock-20261124/`.
+
+## Fourth-fix and final checkpoint
+
+Three backend regressions and one component regression failed before the final
+implementation. Empty approval now fails before consuming the API interrupt;
+revision processes feedback without requiring executable candidate validation.
+An empty selection retains original content only as a reference draft, with
+explicit exclusions. That draft cannot return to review until a replacement
+plan is saved. Independent code review found no substantive issues.
+
+Dedicated empty-selection browser result: **PASS**, 48.6 seconds, same real
+Bedrock model and Cohere embeddings. Verified disabled empty approval, required
+feedback for revision, HTTP 422 for a direct empty approval while preserving
+the active interrupt, and no dataset at that point. Then submitted feedback
+requesting marital status instead; the model produced a replacement plan and
+extracted exactly `SEQN`, `DMDMARTL` after approval.
+Evidence: `/private/tmp/epi-review-empty-selection-bedrock-20261124/`.
+
+Final focused backend suite: **137 passed**, including selection, feedback,
+SQL validation, API contracts, filter validation, metadata, artifact lifecycle,
+root projection, and conversation-event regressions. UI suite: **7 passed**.
+The tracked production frontend was rebuilt; delivery-manifest verification and
+`git diff --check` pass.
+
+An additional isolated replay used Yaoan's exact historical three-table approved
+plan and real installed NHANES data. The original SQL selecting unchecked sex
+returned SQL_REPAIR_REQUIRED before persistence. Removing that output, with the
+same approved plan, persisted **6,401 rows** containing participant identifiers,
+HbA1c, age, and BMI. The original conversation was not modified.
+Evidence: `/private/tmp/epi-review-yaoan-three-table-20261124.json`.
+
+All four changes remain on `codex/dataset-plan-review-fixes`. No production
+deployment, primary-checkout integration, or user-history changes were made.

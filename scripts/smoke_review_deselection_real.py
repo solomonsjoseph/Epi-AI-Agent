@@ -129,10 +129,36 @@ def main(*, scenario='deselection'):
                         assert review['model_name'] == args.model, review['model_name']
                     save('initial-review.json', review)
                     excluded_column = 'RIAGENDR'
+                    excluded_columns = [excluded_column]
+                    if scenario == 'empty_selection':
+                        excluded_columns = [column['column'] for group in review['active_interrupt']['view']['concept_groups'] for column in group['columns']]
+                        excluded_column = excluded_columns[0]
+                        page.get_by_role('button', name='All concepts', exact=True).click()
+                        for checkbox in page.get_by_role('checkbox').all():
+                            checkbox.uncheck()
+                        assert page.get_by_role('button', name='Approve plan and extract', exact=True).is_disabled()
+                        assert 'Select at least one variable' in page.get_by_role('status').inner_text()
+                        page.get_by_role('button', name='Request revision', exact=True).click()
+                        assert 'Please enter revision feedback' in page.get_by_role('alert').inner_text()
+                        initial_id = review['active_interrupt']['id']
+                        response = requests.post(f'{url}/api/threads/{thread}/interrupts/{initial_id}/resume', json={'action': 'approve', 'selected_column_keys': []}, timeout=5)
+                        assert response.status_code == 422, response.text
+                        unchanged = api(f'/api/threads/{thread}/state')
+                        save('empty-approval-rejection.json', {'status': response.status_code, 'response': response.json(), 'state': unchanged})
+                        assert unchanged['active_interrupt']['id'] == initial_id
+                        assert not unchanged['datasets']
+                        page.get_by_role('textbox', name='Revision feedback', exact=True).fill('Use only marital status DMDMARTL from DEMO_J instead. Do not include age, sex, or race/ethnicity.')
+                        page.get_by_role('button', name='Request revision', exact=True).click()
+                        revised_review = wait_for('dataset_plan_review', prior_interrupt_id=initial_id)
+                        save('revised-review.json', revised_review)
+                        revised_columns = [column['column'] for group in revised_review['active_interrupt']['view']['concept_groups'] for column in group['columns']]
+                        assert revised_columns == ['DMDMARTL'], revised_columns
+                        result.update(empty_approval_status=422, interrupt_preserved=True, empty_revision_processed=True)
                     if scenario == 'revision_scope':
                         group = review['active_interrupt']['view']['concept_groups'][0]
                         assert len(group['columns']) == 1
                         excluded_column = group['columns'][0]['column']
+                        excluded_columns = [excluded_column]
                         page.get_by_role('textbox', name='Revision feedback', exact=True).fill("don't choose this")
                         page.get_by_role('button', name='Request revision', exact=True).click()
                         revised_review = wait_for('dataset_plan_review', prior_interrupt_id=review['active_interrupt']['id'])
@@ -144,6 +170,7 @@ def main(*, scenario='deselection'):
                         group = review['active_interrupt']['view']['concept_groups'][0]
                         assert len(group['columns']) == 1 and len(review['active_interrupt']['view']['concept_groups']) > 1
                         excluded_column = group['columns'][0]['column']
+                        excluded_columns = [excluded_column]
                         checkbox_name = f"{group['columns'][0]['table']} · {excluded_column}"
                         page.get_by_role('checkbox', name=checkbox_name, exact=True).uncheck()
                         assert page.get_by_role('button', name='Approve & continue', exact=True).is_enabled()
@@ -152,11 +179,11 @@ def main(*, scenario='deselection'):
                         assert not page.get_by_role('checkbox', name=checkbox_name, exact=True).is_checked()
                     page.get_by_role('button', name='All concepts', exact=True).click()
                     excluded = page.get_by_role('checkbox', name=f'DEMO_J · {excluded_column}', exact=True)
-                    if scenario == 'revision_scope':
+                    if scenario in {'revision_scope', 'empty_selection'}:
                         assert excluded.count() == 0
                     elif scenario != 'concept_skip':
                         excluded.uncheck()
-                    if scenario != 'revision_scope':
+                    if scenario not in {'revision_scope', 'empty_selection'}:
                         assert not excluded.is_checked()
                     page.get_by_role('button', name='Approve plan and extract', exact=True).click()
                     dataset_state = wait_for('dataset_review')
@@ -171,12 +198,12 @@ def main(*, scenario='deselection'):
                     approved = [item for item in store.list_artifacts(kind='dataset_plan') if item.status == 'approved']
                     assert len(approved) == 1
                     selected = [field for concept in approved[0].content['concepts'] for field in concept['fields']]
-                    assert excluded_column not in [field['column'] for field in selected]
+                    assert not set(excluded_columns) & {field['column'] for field in selected}
                     datasets = list(state['artifacts']['datasets'].values())
                     assert len(datasets) == 1
                     columns = pd.read_parquet(datasets[0]['path']).columns.tolist()
                     schema = json.loads(Path(datasets[0]['schema_path']).read_text())
-                    assert excluded_column not in json.dumps(schema), schema
+                    assert all(column not in json.dumps(schema) for column in excluded_columns), schema
                     assert len(columns) == len(selected) + len(approved[0].content['required_fields'])
                     result.update(status='passed', thread_id=thread, output_columns=columns, excluded=f'DEMO_J.{excluded_column}')
                     page.screenshot(path=str(artifacts / 'success.png'), full_page=True)

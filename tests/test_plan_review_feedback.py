@@ -75,3 +75,40 @@ def test_direct_tool_rejects_unknown_scope_before_saving_revision(runtime):
         graph.invoke(Command(resume={'action': 'revise', 'feedback': "don't choose this", 'review_concept_id': 'missing'}), config)
     assert error.value.code == 'REVIEW_DECISION_INVALID'
     assert len(context.artifact_store.list_artifacts(kind='dataset_plan')) == before
+
+
+def test_empty_approval_is_rejected_before_interrupt_resume(runtime):
+    graph, config, _, _ = review_graph(runtime)
+    before = graph.get_state(config).interrupts
+    with pytest.raises(InvalidInterruptDecisionError, match='Select at least one variable'):
+        validate_resume_decision(interrupt(), {'action': 'approve', 'selected_column_keys': []})
+    assert graph.get_state(config).interrupts == before
+
+
+def test_direct_tool_rejects_empty_approval_without_artifact_creation(runtime):
+    graph, config, context, _ = review_graph(runtime)
+    before = len(context.artifact_store.list_artifacts(kind='dataset_plan'))
+    with pytest.raises(ToolExecutionError) as error:
+        graph.invoke(Command(resume={'action': 'approve', 'selected_column_keys': []}), config)
+    assert error.value.code == 'REVIEW_SELECTION_REQUIRED'
+    assert len(context.artifact_store.list_artifacts(kind='dataset_plan')) == before
+    assert not context.artifact_store.snapshot().get('datasets')
+
+
+def test_empty_revision_delivers_feedback_and_keeps_reference_only_draft(runtime):
+    graph, config, context, original = review_graph(runtime)
+    prior_content = context.artifact_store.require(original).content
+    result = graph.invoke(Command(resume={'action': 'revise', 'selected_column_keys': [], 'feedback': 'Use marital status instead.'}), config)
+    revised = max(context.artifact_store.list_artifacts(kind='dataset_plan'), key=lambda item: item.version)
+    assert revised.status == 'draft'
+    assert revised.content == prior_content
+    review_context = revised.provenance['review_context']
+    assert review_context['selection_empty'] is True
+    assert review_context['selected_column_keys'] == []
+    assert review_context['excluded_column_keys'] == ['source::participants::age', 'source::participants::sex']
+    assert result['decision']['text'] == 'Use marital status instead.'
+    assert 'reference only' in result['message']
+    assert not context.artifact_store.snapshot().get('datasets')
+    with pytest.raises(ToolExecutionError) as error:
+        RequestDatasetPlanReviewTool().invoke({'plan_id': revised.id, 'version': revised.version}, context)
+    assert error.value.code == 'PLAN_REVISION_REQUIRED'

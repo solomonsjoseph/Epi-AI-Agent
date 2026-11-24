@@ -709,6 +709,12 @@ class RequestDatasetPlanReviewTool:
                 ),
                 recoverable=True,
             )
+        if dict(stored.provenance.get("review_context") or {}).get("selection_empty"):
+            raise ToolExecutionError(
+                "PLAN_REVISION_REQUIRED",
+                "This draft retains excluded fields for reference only. Apply the human feedback and save a replacement plan before requesting review.",
+                recoverable=True,
+            )
         _validate_dataset_plan(
             {"plan_id": plan_id, "plan_version": version},
             context,
@@ -791,9 +797,14 @@ class RequestDatasetPlanReviewTool:
             plan,
             selected_keys,
         )
-        _validate_plan(candidate, context)
-
         if action == "approve":
+            if not any(concept.fields for concept in candidate.concepts):
+                raise ToolExecutionError(
+                    "REVIEW_SELECTION_REQUIRED",
+                    "Select at least one variable to extract a dataset. Request a revision with feedback or cancel this review.",
+                    recoverable=True,
+                )
+            _validate_plan(candidate, context)
             try:
                 reference = context.artifact_store.save_dataset_plan(
                     candidate,
@@ -862,9 +873,10 @@ class RequestDatasetPlanReviewTool:
             "concept_label": scoped_concept.label if scoped_concept else None,
             "selected_column_keys": selected_keys_for_revision,
             "excluded_column_keys": sorted(original_keys - set(selected_keys_for_revision)),
+            "selection_empty": not bool(selected_keys_for_revision),
         }
         reference = context.artifact_store.save_dataset_plan(
-            candidate,
+            candidate if selected_keys_for_revision else plan,
             status="draft",
             prior_id=plan_id,
             prior_version=version,
@@ -885,6 +897,12 @@ class RequestDatasetPlanReviewTool:
                 f"plan_id={reference.id} version={reference.version} "
                 "status=draft. "
                 f"Review context: {json.dumps(review_context, sort_keys=True)}. "
+                + (
+                    "No variables are selected. Original fields are retained for reference only, not selected or approved. "
+                    "Use the feedback to save a replacement plan or ask a focused scientific clarification if necessary. Do not extract or automatically restore excluded variables. "
+                    if not selected_keys_for_revision else ""
+                )
+                +
                 "Use the scoped concept to resolve references such as 'this'. "
                 "Honor checkbox exclusions. Checked fields describe the current "
                 "draft and do not override changes requested in the feedback."

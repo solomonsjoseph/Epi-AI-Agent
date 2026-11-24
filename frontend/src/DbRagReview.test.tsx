@@ -76,3 +76,34 @@ describe("revision scope", () => {
     expect(onDecision.mock.calls[0][0]).not.toHaveProperty("review_concept_id");
   });
 });
+
+describe("zero selections", () => {
+  function clearAll() {
+    fireEvent.click(screen.getByRole("button", { name: "All concepts" }));
+    for (const checkbox of screen.getAllByRole("checkbox")) fireEvent.click(checkbox);
+  }
+
+  it("explains empty approval and still submits nonempty revision feedback", () => {
+    const onDecision = vi.fn();
+    render(<DbRagReview interrupt={review()} onDecision={onDecision} />);
+    clearAll();
+    expect(screen.getByRole("button", { name: "Approve plan and extract" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Select at least one variable");
+    fireEvent.change(screen.getByRole("textbox", { name: "Revision feedback" }), { target: { value: "Use marital status instead" } });
+    expect(screen.getByRole("button", { name: "Approve plan and extract" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Request revision" }));
+    expect(onDecision).toHaveBeenCalledWith({ action: "revise", feedback: "Use marital status instead", selected_column_keys: [] });
+  });
+
+  it("requires feedback for empty revision and restores approval when a variable is selected", () => {
+    const onDecision = vi.fn();
+    render(<DbRagReview interrupt={review()} onDecision={onDecision} />);
+    clearAll();
+    fireEvent.click(screen.getByRole("button", { name: "Request revision" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Please enter revision feedback.");
+    expect(onDecision).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "participants · age" }));
+    expect(screen.getByRole("button", { name: "Approve plan and extract" })).toBeEnabled();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+});

@@ -326,6 +326,10 @@ def validate_resume_decision(
             raise InvalidInterruptDecisionError(
                 "selected_column_keys must be unique."
             )
+        if action == "approve" and not selected:
+            raise InvalidInterruptDecisionError(
+                "Select at least one variable to extract a dataset. Request a revision with feedback or cancel this review."
+            )
         normalized["selected_column_keys"] = selected
     if interrupt_type == "dataset_plan_review" and action == "revise" and "review_concept_id" in decision:
         allowed.add("review_concept_id")

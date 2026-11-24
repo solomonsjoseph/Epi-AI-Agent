@@ -245,6 +245,12 @@ export default function DbRagReview({
         />
       </label>
       {feedbackError ? <p role="alert">{feedbackError}</p> : null}
+      {approvedKeys.length === 0 ? (
+        <p role="status">
+          Select at least one variable to extract a dataset. You can request a
+          revision with feedback or cancel this review.
+        </p>
+      ) : null}
 
       <div className="db-rag-review-actions">
         {activeMode === "step" && conceptIndex > 0 ? (
@@ -260,7 +266,7 @@ export default function DbRagReview({
         {activeMode === "all" || isFinalConcept ? (
           <button
             className="review-action-primary"
-            disabled={disabled}
+            disabled={disabled || approvedKeys.length === 0}
             onClick={() =>
               onDecision({
                 action: "approve",
