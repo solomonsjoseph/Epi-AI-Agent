@@ -1,5 +1,5 @@
 {
-  "built_at": "2026-11-25T07:53:52.049332+00:00",
+  "built_at": "2026-11-25T13:26:58.928890+00:00",
   "source_sha256": {
     "frontend/index.html": "89f2b276eb183f4ebfe35982a0cac2d863da771436560c61d977e282ee15b07a",
     "frontend/package-lock.json": "a14f127c2e852575ffd49c7e3c4c5e342da58af5f92b45622f0963064b0ad1d5",
@@ -21,7 +21,7 @@
     "frontend/src/EmbeddingFallbackNotice.tsx": "b9500df5ed07480b383868fd98c17b595bd92dcf35174c79c5021d7040eed067",
     "frontend/src/MessageAttachment.tsx": "27cd251b6798e85d34d47bfbd88f7b85c427efc546d397c8bcc84de0e9774c9a",
     "frontend/src/ModelOutputLimit.tsx": "11772c85d484d46bdb6cf7e80ae2360a7578bce36dfaccb05ced574e8b76dfa7",
-    "frontend/src/UploadPlugModal.tsx": "3578ddca100c1d6d93e767c071c19b093f808c19293e8bb80dad468765ce6cab",
+    "frontend/src/UploadPlugModal.tsx": "157905a315ac1831fd4230f528405b3347008383c18c073cab4d21a424a69064",
     "frontend/src/apiClient.ts": "3347ab0505ad9b0e9d14dfb2698608c4351e3463b1a8aaf9e9c1968d00ee10cc",
     "frontend/src/config.ts": "e1dd49bf31ef600311bc1b235b88b8436008267821c72e24c649b85ddfb52ca9",
     "frontend/src/katex-auto-render.d.ts": "bb35c7c0610d7f2f583d6920e1f8d633050390c121c9fbd29247b8ef9b0b7303",
