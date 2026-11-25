@@ -13,6 +13,19 @@
       "api_key_env": "OPENAI_API_KEY",
       "timeout_seconds": 10,
       "enabled": true
+    },
+    {
+      "id": "bedrock-cohere-embed-v4",
+      "label": "Cohere Embed v4 on Amazon Bedrock",
+      "provider": "bedrock",
+      "transport": "bedrock_cohere_embeddings",
+      "model": "cohere.embed-v4:0",
+      "index_compatibility": "Bedrock/cohere-embed-v4-1536",
+      "dimensions": 1536,
+      "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+      "api_key_env": "BEDROCK_API_KEY",
+      "timeout_seconds": 10,
+      "enabled": true
     }
   ]
 }

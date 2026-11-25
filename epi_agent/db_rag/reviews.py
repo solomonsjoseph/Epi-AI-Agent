@@ -709,6 +709,12 @@ class RequestDatasetPlanReviewTool:
                 ),
                 recoverable=True,
             )
+        if dict(stored.provenance.get("review_context") or {}).get("selection_empty"):
+            raise ToolExecutionError(
+                "PLAN_REVISION_REQUIRED",
+                "This draft retains excluded fields for reference only. Apply the human feedback and save a replacement plan before requesting review.",
+                recoverable=True,
+            )
         _validate_dataset_plan(
             {"plan_id": plan_id, "plan_version": version},
             context,
@@ -779,15 +785,26 @@ class RequestDatasetPlanReviewTool:
                 recoverable=True,
             )
 
+        scope = decision.get("review_concept_id")
+        scoped_concept = None
+        if "review_concept_id" in decision:
+            scoped_concept = next((concept for concept in plan.concepts if concept.concept_id == str(scope or "").strip()), None)
+            if action != "revise" or scoped_concept is None:
+                raise ToolExecutionError("REVIEW_DECISION_INVALID", "Revision concept must belong to the active plan review.", recoverable=True)
         selected = decision.get("selected_column_keys")
         selected_keys = list(selected) if isinstance(selected, list) else None
         candidate = _selected_plan(
             plan,
             selected_keys,
         )
-        _validate_plan(candidate, context)
-
         if action == "approve":
+            if not any(concept.fields for concept in candidate.concepts):
+                raise ToolExecutionError(
+                    "REVIEW_SELECTION_REQUIRED",
+                    "Select at least one variable to extract a dataset. Request a revision with feedback or cancel this review.",
+                    recoverable=True,
+                )
+            _validate_plan(candidate, context)
             try:
                 reference = context.artifact_store.save_dataset_plan(
                     candidate,
@@ -807,11 +824,31 @@ class RequestDatasetPlanReviewTool:
                     str(error),
                     recoverable=True,
                 ) from error
+            output_summary = [
+                {
+                    "key": _column_key(field.model_dump(mode="json")),
+                    "output_column": field.output_column or field.column,
+                }
+                for field in [
+                    *candidate.required_fields,
+                    *(field for concept in candidate.concepts for field in concept.fields),
+                ]
+            ]
+            selected_output_keys = {field["key"] for field in output_summary}
+            excluded_keys = sorted({
+                _column_key(field.model_dump(mode="json"))
+                for concept in plan.concepts
+                for field in concept.fields
+            } - selected_output_keys)
             return ToolResult(
                 message=(
                     f"Dataset plan review action=approve "
                     f"plan_id={reference.id} version={reference.version} "
-                    "status=approved."
+                    "status=approved. "
+                    f"Frozen approved output fields: {json.dumps(output_summary)}. "
+                    f"Excluded field keys: {json.dumps(excluded_keys)}. "
+                    "Generate SQL only for these outputs; do not restore "
+                    "unchecked variables from the earlier goal or operation references."
                 ),
                 artifacts=(reference,),
             )
@@ -823,8 +860,23 @@ class RequestDatasetPlanReviewTool:
                 "Semantic dataset-plan revision requires human feedback.",
                 recoverable=True,
             )
+        selected_keys_for_revision = sorted({
+            _column_key(field.model_dump(mode="json"))
+            for concept in candidate.concepts for field in concept.fields
+        })
+        original_keys = {
+            _column_key(field.model_dump(mode="json"))
+            for concept in plan.concepts for field in concept.fields
+        }
+        review_context = {
+            "concept_id": scoped_concept.concept_id if scoped_concept else None,
+            "concept_label": scoped_concept.label if scoped_concept else None,
+            "selected_column_keys": selected_keys_for_revision,
+            "excluded_column_keys": sorted(original_keys - set(selected_keys_for_revision)),
+            "selection_empty": not bool(selected_keys_for_revision),
+        }
         reference = context.artifact_store.save_dataset_plan(
-            candidate,
+            candidate if selected_keys_for_revision else plan,
             status="draft",
             prior_id=plan_id,
             prior_version=version,
@@ -834,6 +886,7 @@ class RequestDatasetPlanReviewTool:
                 "producer": "dbrag-request_dataset_plan_review",
                 "review_action": "revise",
                 "review_feedback": feedback,
+                "review_context": review_context,
             },
         )
         return ToolResult(
@@ -842,7 +895,21 @@ class RequestDatasetPlanReviewTool:
                 f'Feedback: "{feedback}" '
                 f"prior_plan_id={plan_id} prior_version={version} "
                 f"plan_id={reference.id} version={reference.version} "
-                "status=draft."
+                "status=draft. "
+                f"Review context: {json.dumps(review_context, sort_keys=True)}. "
+                + (
+                    "No variables are selected. Original fields are retained for reference only, not selected or approved. "
+                    "Use the feedback to save a replacement plan or ask a focused scientific clarification if necessary. Do not extract or automatically restore excluded variables. "
+                    if not selected_keys_for_revision else ""
+                )
+                +
+                "Use the scoped concept to resolve references such as 'this'. "
+                "Scoped feedback such as 'don't choose this' or 'do not select this' "
+                "explicitly requests removing the reviewed field or concept, even "
+                "when checked. Save a replacement without it, preserve the other "
+                "selections, and request review without asking whether to keep it. "
+                "Honor checkbox exclusions. Checked fields describe the current "
+                "draft and do not override changes requested in the feedback."
             ),
             artifacts=(reference,),
             conversation_review_decision={
