@@ -904,6 +904,10 @@ class RequestDatasetPlanReviewTool:
                 )
                 +
                 "Use the scoped concept to resolve references such as 'this'. "
+                "Scoped feedback such as 'don't choose this' or 'do not select this' "
+                "explicitly requests removing the reviewed field or concept, even "
+                "when checked. Save a replacement without it, preserve the other "
+                "selections, and request review without asking whether to keep it. "
                 "Honor checkbox exclusions. Checked fields describe the current "
                 "draft and do not override changes requested in the feedback."
             ),

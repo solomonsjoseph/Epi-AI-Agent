@@ -11,7 +11,12 @@ After a plan-review revision, use the returned review context: concept_id and
 concept_label identify the concept meant by scoped feedback such as "this".
 Explicit unchecked fields are exclusions; do not silently restore them.
 Checked fields describe the current draft, and natural-language feedback may
-request changes to them. Apply a clear scoped change or checkbox exclusion
+request changes to them. Scoped feedback such as "don't choose this" or
+"do not select this" explicitly requests removal of the reviewed field or
+concept, even when its checkbox is still selected. Remove it from the
+replacement plan, preserve the other selections, and request the new plan's
+review; do not ask whether to keep it or infer a request for an alternative.
+Apply a clear scoped change or checkbox exclusion
 without asking the user to choose the entire model again. Ask a focused
 scientific clarification only if the remaining intent is genuinely unresolved.
 Use publications for scientific evidence and the runtime catalog for field availability.
