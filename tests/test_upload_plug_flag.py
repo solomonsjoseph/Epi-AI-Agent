@@ -852,6 +852,10 @@ def test_context_card_bounds_long_headers_like_other_columns() -> None:
         {**_summary(0), "changed_columns": [{"header": "x", "action": "unsure", "written": "w"}]},
         {**_summary(0), "changed_columns": [{"header": 1, "action": "name", "written": "w"}]},
         {**_summary(0), "changed_columns": ["x"]},
+        {**_summary(1), "method": []},
+        {**_summary(1), "method": {}},
+        {**_summary(0), "changed_columns": [{"header": "x", "action": [], "written": "w"}]},
+        {**_summary(0), "changed_columns": [{"header": "x", "action": {}, "written": "w"}]},
     ],
 )
 def test_context_card_drops_a_malformed_summary(summary) -> None:

@@ -458,7 +458,12 @@ def _deidentification_card(value: object) -> dict[str, Any] | None:
     stored with the summary reaches the model."""
     if not isinstance(value, dict):
         return None
-    method = _DEIDENTIFIED_METHOD_WORDS.get(value.get("method"))  # type: ignore[arg-type]
+    method_code = value.get("method")
+    method = (
+        _DEIDENTIFIED_METHOD_WORDS.get(method_code)
+        if isinstance(method_code, str)
+        else None
+    )
     kept = value.get("kept_columns")
     changed = value.get("changed_columns")
     if (
@@ -473,7 +478,12 @@ def _deidentification_card(value: object) -> dict[str, Any] | None:
     for column in changed:
         if not isinstance(column, dict):
             return None
-        action = _DEIDENTIFIED_ACTION_WORDS.get(column.get("action"))  # type: ignore[arg-type]
+        action_code = column.get("action")
+        action = (
+            _DEIDENTIFIED_ACTION_WORDS.get(action_code)
+            if isinstance(action_code, str)
+            else None
+        )
         header = column.get("header")
         written = column.get("written")
         if action is None or not isinstance(header, str) or not isinstance(written, str):

@@ -460,8 +460,15 @@ def _unzip_members(
         raise UploadPlugError(
             "PLUG_REJECTED", "the prepared archive could not be read safely"
         ) from None
-    checked = _check_record(body)
-    return PlugDelivery(files=files, record=checked, summaries=_summaries(checked, members))
+    try:
+        checked = _check_record(body)
+        summaries = _summaries(checked, members)
+    except UploadPlugError:
+        raise
+    except Exception:
+        # A value of an unexpected type must refuse, never fail the request another way.
+        raise _invalid_record() from None
+    return PlugDelivery(files=files, record=checked, summaries=summaries)
 
 
 def _read_members(
@@ -549,6 +556,12 @@ def _texts(value: object, *, max_items: int | None = None) -> list[str]:
     return [_text(item) for item in value]
 
 
+def _code(value: object, allowed) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise _invalid_record()
+    return value
+
+
 def _object(value: object, keys: set[str]) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != keys:
         raise _invalid_record()
@@ -570,8 +583,9 @@ def _check_record(body: bytes) -> dict[str, Any]:
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise _invalid_record() from None
     _object(record, _RECORD_KEYS)
-    if record["contract"] != CONTRACT_VERSION or record["method"] not in RECORD_METHODS:
+    if record["contract"] != CONTRACT_VERSION:
         raise _invalid_record()
+    _code(record["method"], RECORD_METHODS)
     for key in ("model", "prompt_version", "gate", "statement"):
         _text(record[key])
     _texts(record["not_sent"])
@@ -584,12 +598,9 @@ def _check_record(body: bytes) -> dict[str, Any]:
             _text(column[key])
         _count(column["sheet"])
         _count(column["cells_changed"])
-        if (
-            column["action"] not in RECORD_ACTIONS
-            or column["source"] not in _RECORD_SOURCES
-            or not isinstance(column["reason"], str)
-            or not _REASON_RE.fullmatch(column["reason"])
-        ):
+        _code(column["action"], RECORD_ACTIONS)
+        _code(column["source"], _RECORD_SOURCES)
+        if not isinstance(column["reason"], str) or not _REASON_RE.fullmatch(column["reason"]):
             raise _invalid_record()
     for row in record["risk"]:
         _object(row, _RISK_KEYS)
