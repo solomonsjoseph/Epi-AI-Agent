@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 import re
 from typing import Any
 
+from study_package.manifest import BEDROCK_COHERE_EMBEDDING_MODEL
+
 from .config import EMBEDDING_MODEL
 from .embedding_profiles import EmbeddingProfile, EmbeddingProfileResolution
 from .retrieval_status import EmbeddingReasonCode
@@ -12,6 +14,8 @@ from .retrieval_status import EmbeddingReasonCode
 
 EmbeddingFactory = Callable[[str, str], Any]
 EmbeddingAdapterFactory = Callable[[EmbeddingProfile, str], Any]
+
+_BEDROCK_COHERE_TRANSPORT = "bedrock_cohere_embeddings"
 
 _PROVIDER_CREDENTIALS = {
     "openai": "OPENAI_API_KEY",
@@ -37,8 +41,22 @@ def _openai_adapter(profile: EmbeddingProfile, api_key: str) -> Any:
     )
 
 
+def _bedrock_cohere_adapter(profile: EmbeddingProfile, api_key: str) -> Any:
+    from .bedrock_embeddings import BedrockCohereEmbeddingFunction, REGION_NAME
+
+    return BedrockCohereEmbeddingFunction(
+        api_key=api_key,
+        region_name=REGION_NAME,
+        model_name=profile.model,
+        dimensions=profile.dimensions,
+        timeout_seconds=profile.timeout_seconds,
+        base_url=profile.base_url,
+    )
+
+
 EMBEDDING_ADAPTERS: Mapping[str, EmbeddingAdapterFactory] = {
     "openai_embeddings": _openai_adapter,
+    _BEDROCK_COHERE_TRANSPORT: _bedrock_cohere_adapter,
 }
 
 
@@ -103,18 +121,28 @@ def resolve_profile_route(
             profile_label=resolution.profile_label,
         )
 
-    api_key = str(environ.get(profile.api_key_env, "") or "").strip()
+    uses_bedrock_cohere_transport = profile.transport == _BEDROCK_COHERE_TRANSPORT
+    uses_bedrock_cohere_index = profile.index_compatibility == BEDROCK_COHERE_EMBEDDING_MODEL
+    credential_env = profile.api_key_env
+    api_key = str(environ.get(credential_env, "") or "").strip()
+    if not api_key and uses_bedrock_cohere_transport and credential_env == "BEDROCK_API_KEY":
+        alias = "AWS_BEARER_TOKEN_BEDROCK"
+        api_key = str(environ.get(alias, "") or "").strip()
+        if api_key:
+            credential_env = alias
     selected_adapters = EMBEDDING_ADAPTERS if adapters is None else adapters
     factory = selected_adapters.get(profile.transport)
     reason_code: EmbeddingReasonCode | None = None
-    if not api_key:
+    if uses_bedrock_cohere_transport != uses_bedrock_cohere_index:
+        reason_code = "EMBEDDING_PROFILE_INVALID"
+    elif not api_key:
         reason_code = "EMBEDDING_CREDENTIALS_MISSING"
     elif factory is None:
         reason_code = "EMBEDDING_TRANSPORT_UNAVAILABLE"
     return EmbeddingRoute(
         model=profile.index_compatibility,
         provider=profile.provider,
-        credential_env=profile.api_key_env,
+        credential_env=credential_env,
         api_key=api_key,
         factory=factory,
         unavailable_reason_code=reason_code,

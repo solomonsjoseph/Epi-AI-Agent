@@ -43,6 +43,7 @@ from epi_agent.artifacts import (
     dataset_plan_from_artifact,
 )
 from epi_agent.db_rag import persistence as db_rag_persistence
+from epi_agent.db_rag.metadata import metadata_tool_result
 from epi_agent.dataset_reuse import dataset_storage_content
 from epi_agent.db_rag.references import FieldRef, TableRef
 from epi_agent.db_rag.quality import inspect_dataset as inspect_dataset_artifact
@@ -78,7 +79,6 @@ from utils.dataset_artifacts import (
 _MAX_SEARCH_HITS = 10
 _MAX_CATALOG_QUERIES = 5
 _MAX_TABLE_FIELDS = 25
-_MAX_MODEL_CATALOG_TEXT_CHARS = 80
 _MAX_EXCERPT_CHARS = 500
 _MAX_OPEN_CHARS = 4_000
 _DBRAG_TOOL_PREFIX = "dbrag-"
@@ -107,6 +107,14 @@ def _dbrag_tool_name(operation: str) -> str:
 class OpenArtifactArguments(BaseModel):
     artifact_id: str
     version: int = Field(ge=1)
+    offset: int = Field(
+        default=0, ge=0,
+        description="Saved metadata item offset from next_page arguments.",
+    )
+    text_offset: int = Field(
+        default=0, ge=0,
+        description="Character offset for an explicitly split oversized definition.",
+    )
 
 
 class CatalogSearchArguments(BaseModel):
@@ -329,7 +337,7 @@ def _schema_evidence_hit(value: Any) -> dict[str, Any]:
         **({"source": source} if source else {}),
         "table": table,
         **({"column": column} if column else {}),
-        "text": _bounded_text(_provider_field(value, "text")),
+        "text": str(_provider_field(value, "text") or ""),
         "source_kind": (
             _bounded_text(_provider_field(value, "source_kind"), limit=100)
             or "schema"
@@ -343,6 +351,23 @@ def _provider_field(value: Any, field: str) -> Any:
     if isinstance(value, dict):
         return value.get(field)
     return getattr(value, field, None)
+
+
+def _attach_field_metadata(hit: dict[str, Any], catalog: Any) -> None:
+    getter = getattr(catalog, "field_metadata", None)
+    if not hit.get("column") or not callable(getter):
+        return
+    metadata = getter(hit.get("source", ""), hit["table"], hit["column"])
+    if not isinstance(metadata, dict):
+        return
+    if metadata.get("text") is not None:
+        hit["text"] = str(metadata["text"])
+    details = {
+        key: value for key, value in metadata.items()
+        if key not in {"source", "source_id", "table", "column", "text"}
+    }
+    if details:
+        hit["metadata"] = details
 
 
 def _bounded_text(value: Any, *, limit: int = _MAX_EXCERPT_CHARS) -> str:
@@ -616,12 +641,9 @@ def _render_evidence(content: dict[str, Any]) -> dict[str, Any]:
 def _compact_catalog_hit(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    hit = {
-        "text": _bounded_text(
-            value.get("text"),
-            limit=_MAX_MODEL_CATALOG_TEXT_CHARS,
-        )
-    }
+    hit = {"text": str(value.get("text") or "")}
+    if isinstance(value.get("metadata"), dict):
+        hit["metadata"] = value["metadata"]
     matched_by = _safe_string_list(value.get("matched_by"), limit=2)
     if matched_by:
         hit["matched_by"] = [
@@ -723,10 +745,12 @@ def _compact_inspection_field(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     result = {
-        key: _bounded_text(value.get(key), limit=300)
+        key: str(value.get(key))
         for key in ("column", "text", "source_kind")
         if value.get(key) is not None
     }
+    if isinstance(value.get("metadata"), dict):
+        result["metadata"] = value["metadata"]
     try:
         field_ref = FieldRef.model_validate(value.get("field_ref"))
     except ValidationError:
@@ -1130,14 +1154,23 @@ def _open_artifact(arguments: dict[str, Any], context: ToolContext) -> ToolResul
             f"Artifact content is stale: {artifact.kind} {artifact.id}",
             recoverable=True,
         ) from error
+    reference = ArtifactRef(id=artifact.id, kind=artifact.kind, version=artifact.version)
+    if artifact.kind in {"catalog_search", "table_profile"}:
+        return metadata_tool_result(
+            safe_content,
+            reference,
+            offset=arguments["offset"],
+            text_offset=arguments["text_offset"],
+        )
+    if arguments["offset"] or arguments["text_offset"]:
+        raise ToolExecutionError(
+            "ARTIFACT_PAGINATION_UNSUPPORTED",
+            "Item and text offsets are supported only for catalog metadata artifacts.",
+            recoverable=True,
+        )
     rendered = json.dumps(safe_content, sort_keys=True)
     if len(rendered) > _MAX_OPEN_CHARS:
         rendered = rendered[:_MAX_OPEN_CHARS] + "..."
-    reference = ArtifactRef(
-        id=artifact.id,
-        kind=artifact.kind,
-        version=artifact.version,
-    )
     return ToolResult(
         message=f"{artifact.kind} {artifact.id} version {artifact.version}: {rendered}",
         artifacts=(reference,),
@@ -1227,6 +1260,7 @@ def _search_catalog(arguments: dict[str, Any], context: ToolContext) -> ToolResu
                     }
                 else:
                     hit["table_ref"] = table_ref
+            _attach_field_metadata(hit, study.catalog)
             hit["retrieval_probe"] = query
             normalized_hits.append(hit)
             all_hits.append(hit)
@@ -1292,14 +1326,7 @@ def _search_catalog(arguments: dict[str, Any], context: ToolContext) -> ToolResu
         ),
         study_id=study.study_id,
     )
-    return ToolResult(
-        message=json.dumps(
-            _render_catalog_search(content),
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
-        artifacts=(reference,),
-    )
+    return metadata_tool_result(_render_catalog_search(content), reference)
 
 
 def _inspect_table(arguments: dict[str, Any], context: ToolContext) -> ToolResult:
@@ -1338,6 +1365,7 @@ def _inspect_table(arguments: dict[str, Any], context: ToolContext) -> ToolResul
             **table_ref.model_dump(mode="json"),
             "column": str(hit.get("column") or ""),
         }
+        _attach_field_metadata(hit, study.catalog)
         fields.append(hit)
     if not fields:
         _raise_missing_result(
@@ -1365,14 +1393,7 @@ def _inspect_table(arguments: dict[str, Any], context: ToolContext) -> ToolResul
         summary=f"Bounded schema profile for {table_ref.table}",
         study_id=study.study_id,
     )
-    return ToolResult(
-        message=json.dumps(
-            _render_table_profile(content),
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
-        artifacts=(reference,),
-    )
+    return metadata_tool_result(_render_table_profile(content), reference)
 
 
 def _find_join_paths(arguments: dict[str, Any], context: ToolContext) -> ToolResult:
@@ -2680,6 +2701,7 @@ def _validate_and_extract(
             sql=attempted_sql,
             approved_tables=tables,
             approved_columns=reference_columns,
+            approved_output_columns=columns,
             database_path=runtime_path,
         )
     except (KeyError, ValueError) as error:
@@ -2690,16 +2712,19 @@ def _validate_and_extract(
                 "frozen approved plan."
             ),
             recoverable=True,
-            details=_sql_repair_details(
-                plan_id=plan_id,
-                plan_version=plan_version,
-                origin=origin,
-                stage="validation",
-                attempted_sql=attempted_sql,
-                error=error,
-                tables=tables,
-                columns=reference_columns,
-            ),
+            details={
+                **_sql_repair_details(
+                    plan_id=plan_id,
+                    plan_version=plan_version,
+                    origin=origin,
+                    stage="validation",
+                    attempted_sql=attempted_sql,
+                    error=error,
+                    tables=tables,
+                    columns=reference_columns,
+                ),
+                "allowed_output_columns": columns,
+            },
         ) from error
     sql_artifact = _validated_sql_artifact(
         context,
@@ -4366,7 +4391,11 @@ def build_db_rag_tool_registry() -> ToolRegistry:
     ] = [
         (
             "open_artifact",
-            "Open an exact versioned artifact using a bounded row-free representation.",
+            (
+                "Open an exact versioned artifact. For metadata, follow next_page "
+                "arguments until complete; oversized definition_part text must "
+                "be assembled in offset order."
+            ),
             OpenArtifactArguments,
             True,
             False,
@@ -4376,7 +4405,8 @@ def build_db_rag_tool_registry() -> ToolRegistry:
             "search_catalog",
             (
                 "Batch all currently needed semantic schema probes, search the "
-                "runtime catalog once, and store bounded field evidence."
+                "runtime catalog once, and return complete stored definitions and coding metadata. "
+                "Follow next_page tool arguments until all retrieved evidence is read."
             ),
             CatalogSearchArguments,
             True,
@@ -4385,7 +4415,11 @@ def build_db_rag_tool_registry() -> ToolRegistry:
         ),
         (
             "inspect_table",
-            "Inspect bounded runtime schema details for one table.",
+            (
+                "Inspect complete stored variable definitions and coding metadata "
+                "for one table. Follow next_page tool arguments to continue; pages "
+                "may contain fewer than the requested limit."
+            ),
             InspectTableArguments,
             True,
             False,

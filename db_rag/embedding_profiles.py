@@ -15,6 +15,7 @@ from .retrieval_status import EmbeddingReasonCode
 
 DEFAULT_EMBEDDING_REGISTRY_PATH = PROJECT_ROOT / "config" / "embedding_models.json"
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+_MODEL_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[0-9]+)?")
 _ENVIRONMENT_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
@@ -50,11 +51,18 @@ class EmbeddingProfile(BaseModel):
             raise ValueError("must not be blank")
         return normalized
 
-    @field_validator("id", "provider", "transport", "model", "index_compatibility")
+    @field_validator("id", "provider", "transport", "index_compatibility")
     @classmethod
     def validate_identifier(cls, value: str) -> str:
         if not _IDENTIFIER_PATTERN.fullmatch(value):
             raise ValueError("must be a safe identifier")
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def validate_model_identifier(cls, value: str) -> str:
+        if not _MODEL_IDENTIFIER_PATTERN.fullmatch(value):
+            raise ValueError("must be a safe model identifier")
         return value
 
     @field_validator("base_url")

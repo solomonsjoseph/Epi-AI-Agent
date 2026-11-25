@@ -34,15 +34,6 @@ function columnLabel(column: {
   return `${column.table} · ${column.column}`;
 }
 
-function selectableKeys(group: ReviewGroup): string[] {
-  return group.columns
-    .filter(
-      (column) =>
-        column.roles.length === 1 && column.roles[0] === "requested",
-    )
-    .map((column) => column.key);
-}
-
 export default function DbRagReview({
   disabled = false,
   interrupt,
@@ -139,6 +130,9 @@ export default function DbRagReview({
       action: "revise",
       feedback: trimmed,
       selected_column_keys: approvedKeys,
+      ...(activeMode === "step" && currentGroup
+        ? { review_concept_id: currentGroup.concept_id }
+        : {}),
     });
   }
 
@@ -251,6 +245,12 @@ export default function DbRagReview({
         />
       </label>
       {feedbackError ? <p role="alert">{feedbackError}</p> : null}
+      {approvedKeys.length === 0 ? (
+        <p className="db-rag-selection-warning" role="status">
+          Select at least one variable to extract a dataset. You can request a
+          revision with feedback or cancel this review.
+        </p>
+      ) : null}
 
       <div className="db-rag-review-actions">
         {activeMode === "step" && conceptIndex > 0 ? (
@@ -266,7 +266,7 @@ export default function DbRagReview({
         {activeMode === "all" || isFinalConcept ? (
           <button
             className="review-action-primary"
-            disabled={disabled}
+            disabled={disabled || approvedKeys.length === 0}
             onClick={() =>
               onDecision({
                 action: "approve",
@@ -280,13 +280,7 @@ export default function DbRagReview({
         ) : (
           <button
             className="review-action-primary"
-            disabled={
-              disabled ||
-              (selectableKeys(currentGroup).length > 0 &&
-                selectableKeys(currentGroup).every(
-                  (key) => !selectedKeys.has(key),
-                ))
-            }
+            disabled={disabled}
             onClick={() =>
               setConceptIndex((current) =>
                 nextConceptIndex(current, groups.length),
@@ -299,7 +293,7 @@ export default function DbRagReview({
         )}
         <button
           className="review-action-primary"
-          disabled={disabled}
+          disabled={disabled || !feedback.trim()}
           onClick={revise}
           type="button"
         >
