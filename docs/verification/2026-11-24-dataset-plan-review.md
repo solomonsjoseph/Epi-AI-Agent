@@ -38,9 +38,10 @@ identities, and logs remain under:
 - `/private/tmp/epi-review-empty-selection-bedrock-20261124/`
 - `/private/tmp/epi-review-yaoan-three-table-20261124.json`
 
-This delivery is local to the preserved development branch. It has not been
-deployed or merged into the primary checkout. Existing CTE/window persistence
-metadata limitations are outside this selection-review change.
+The implementation was verified locally before production delivery. It is now
+merged and deployed; see `2026-11-25-dataset-plan-deployment.md` for the exact
+release and verification receipt. Existing CTE/window persistence metadata
+limitations are outside this selection-review change.
 
 The follow-up UI refinement also passed its own real Bedrock browser check
 once (20.0 seconds), with **11 component tests passing**. In both review modes,
