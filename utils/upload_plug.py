@@ -5,11 +5,12 @@ When it is set, the browser hands a chosen ZIP to the plug's page (shown in a
 modal), the plug prepares the files, and the browser gets back only an opaque
 handle. This module then pulls the prepared study ZIP from the plug, server to
 server, with a shared secret, unzips it in memory and returns its files in the
-same shape the plain upload route stages.
+same shape the plain upload route stages, with the plug's per-column record.
 
 The app does not look inside the prepared files beyond checking the archive,
 their size, hash and type; what the plug does to them is the plug's business.
-Nothing pulled from the plug is written to disk or logged here.
+The record (contract 4) is validated strictly, because a summary of it is shown
+to the model. Nothing pulled from the plug is written to disk or logged here.
 """
 
 from __future__ import annotations
@@ -22,32 +23,29 @@ import os
 import re
 import zipfile
 from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import quote, urlsplit
 
 import httpx
 
-CONTRACT_VERSION = "2"
+CONTRACT_VERSION = "4"
 
 PLUG_URL_ENV = "REPORT_AGENT_UPLOAD_PLUG_URL"
 PLUG_SECRET_ENV = "REPORT_AGENT_UPLOAD_PLUG_SECRET"
 PLUG_TIMEOUT_ENV = "REPORT_AGENT_UPLOAD_PLUG_TIMEOUT_SECONDS"
+PLUG_REQUIRED_ENV = "REPORT_AGENT_UPLOAD_PLUG_REQUIRED"
+
+_TRUE_VALUES = {"1", "true", "yes"}
+_FALSE_VALUES = {"", "0", "false", "no"}
 
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# Contract 4: a role folder, then the file name as uploaded (printable ASCII, no slash or
+# backslash, no leading dot), with an extension the app accepts.
 _MEMBER_PATH_RE = re.compile(
-    r"^(dataset|dictionary|forms|metadata)/(dataset|dictionary|form|metadata)_[1-9][0-9]{0,3}"
-    r"\.(csv|tsv|xlsx|txt|md|json|xml|docx)$"
+    r"^(dataset|dictionary|forms|metadata)/[A-Za-z0-9_(][ -.0-\[\]-~]{0,199}"
+    r"\.(csv|tsv|xlsx|txt|md|json|xml|docx|pdf)$"
 )
-# Each folder holds one role only: dataset/dataset_1.csv, forms/form_1.json.
-_FOLDER_ROLES = {
-    "dataset": "dataset",
-    "dictionary": "dictionary",
-    "forms": "form",
-    "metadata": "metadata",
-}
-# Upper bound on the plug's ZIP (each entry stored or deflated no larger than its file;
-# no extra fields, comments, data descriptors or ZIP64 records): the files, the end
-# record, and per entry a local header (30) and a central entry (46) that each hold the path.
 # The media type the checker writes for each member extension; anything else is refused.
 _MEMBER_MIME = {
     "csv": "text/csv",
@@ -58,7 +56,11 @@ _MEMBER_MIME = {
     "json": "application/json",
     "xml": "application/xml",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pdf": "application/pdf",
 }
+# Upper bound on the plug's ZIP (each entry stored or deflated no larger than its file;
+# no extra fields, comments, data descriptors or ZIP64 records): the files, the end
+# record, and per entry a local header (30) and a central entry (46) that each hold the path.
 _ZIP_END_RECORD_BYTES = 22
 _ZIP_ENTRY_BYTES = 30 + 46
 _ZIP_METHODS = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
@@ -66,6 +68,67 @@ _ZIP_ENCRYPTED_FLAG = 0x1
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 _MIN_SECRET_CHARS = 32
 _MAX_MANIFEST_BYTES = 64 * 1024
+# Contract 4: the plug's per-column record, the archive's last entry. It is validated here
+# and never staged as a chat attachment; a per-file summary of it is kept with each dataset.
+_RECORD_PATH = "record/columns.json"
+_RECORD_MIME = "application/json"
+_MAX_RECORD_BYTES = 2 * 1024 * 1024
+_MAX_RECORD_TEXT = 1024
+_MAX_RISK_COLUMNS = 64
+_RECORD_KEYS = {
+    "contract",
+    "method",
+    "model",
+    "prompt_version",
+    "gate",
+    "request_sha256",
+    "statement",
+    "not_sent",
+    "unchanged_files",
+    "columns",
+    "risk",
+}
+_COLUMN_KEYS = {
+    "file",
+    "sheet",
+    "header",
+    "action",
+    "written",
+    "source",
+    "reason",
+    "cells_changed",
+    "note",
+}
+_RISK_KEYS = {
+    "file",
+    "sheet",
+    "columns",
+    "rows",
+    "classes",
+    "unique_rows",
+    "small_rows",
+    "with_dates",
+}
+RECORD_METHODS = ("safe_harbor", "expert_determination")
+RECORD_ACTIONS = (
+    "keep",
+    "name",
+    "address",
+    "phone",
+    "email",
+    "identifier",
+    "participant_id",
+    "date",
+    "birth_date",
+    "age",
+    "zip",
+    "free_text",
+    "redacted",
+)
+_RECORD_SOURCES = {"dictionary", "header", "values", "model", "researcher"}
+_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+# The checker writes an uploaded .xls dataset as .xlsx and lowercases extensions.
+_DELIVERED_EXTENSION = {"xls": "xlsx"}
 _READ_CHUNK_BYTES = 1024 * 1024
 
 
@@ -84,10 +147,18 @@ class UploadPlugSettings:
     secret: str = field(default="", repr=False)
     timeout_seconds: float = 30.0
     transport: httpx.BaseTransport | None = None
+    # Opt-in: when set and no plug URL is configured, direct uploads are refused instead
+    # of falling back to the plain file picker. Off by default.
+    required: bool = False
 
     @property
     def enabled(self) -> bool:
         return bool(self.url)
+
+    @property
+    def refuses_direct_uploads(self) -> bool:
+        """With a plug, uploads go through it; with none but required, uploads are off."""
+        return self.enabled or self.required
 
     @property
     def origin(self) -> str:
@@ -106,6 +177,7 @@ class UploadPlugSettings:
             url=(os.getenv(PLUG_URL_ENV) or "").strip().rstrip("/"),
             secret=(os.getenv(PLUG_SECRET_ENV) or "").strip(),
             timeout_seconds=float(os.getenv(PLUG_TIMEOUT_ENV) or "30"),
+            required=parse_required(os.getenv(PLUG_REQUIRED_ENV)),
         )
         settings.validate()
         return settings
@@ -136,6 +208,17 @@ class UploadPlugSettings:
             raise ValueError(f"{PLUG_TIMEOUT_ENV} must be positive")
 
 
+def parse_required(value: str | None) -> bool:
+    """``1``, ``true`` or ``yes`` turn the setting on; empty, ``0``, ``false`` or ``no`` leave it
+    off. Anything else refuses to start, so a typo never leaves uploads unchecked."""
+    text = (value or "").strip().lower()
+    if text in _TRUE_VALUES:
+        return True
+    if text in _FALSE_VALUES:
+        return False
+    raise ValueError(f"{PLUG_REQUIRED_ENV} must be 1, true, yes, 0, false, no or empty")
+
+
 def quiet_http_logs() -> None:
     """httpx logs every request URL at INFO, and delivery URLs carry the handle and thread id.
     Called only when a plug is configured, so a plain app keeps its logging as before."""
@@ -163,13 +246,11 @@ def _safe_member_name(name: object) -> str:
 
 
 def _member_basename(path: object) -> str:
-    """Check a manifest path and return the file name the app stages it under."""
+    """Check a manifest path and return the file name the app stages it under: the name the
+    researcher uploaded."""
     if not isinstance(path, str) or not _MEMBER_PATH_RE.fullmatch(path):
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid file path")
-    folder, name = path.split("/", 1)
-    if name.rsplit("_", 1)[0] != _FOLDER_ROLES[folder]:
-        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid file path")
-    return _safe_member_name(name)
+    return _safe_member_name(path.split("/", 1)[1])
 
 
 def _unique_names(names: list[str]) -> None:
@@ -180,6 +261,21 @@ def _unique_names(names: list[str]) -> None:
         seen.add(name.lower())
 
 
+@dataclass(frozen=True)
+class PlugDelivery:
+    """One verified delivery.
+
+    ``files``: ``(filename, mime, content)`` in manifest order, the same shape the plain upload
+    route passes to staging; ``filename`` is the uploaded file name.
+    ``record``: the validated per-column record (never staged, never shown whole to the model).
+    ``summaries``: per staged dataset file name, the compact summary kept with that file.
+    """
+
+    files: list[tuple[str, str, bytes]] = field(repr=False)
+    record: dict[str, Any] = field(repr=False)
+    summaries: dict[str, dict[str, Any]] = field(repr=False)
+
+
 def fetch_delivery(
     settings: UploadPlugSettings,
     handle: str,
@@ -188,13 +284,11 @@ def fetch_delivery(
     max_files: int,
     max_file_bytes: int,
     max_total_bytes: int,
-) -> list[tuple[str, str, bytes]]:
+) -> PlugDelivery:
     """Pull the prepared study ZIP for ``handle``, verify it and unzip it in memory.
 
-    Returns ``(filename, mime, content)`` tuples, the same shape the plain
-    upload route passes to staging; ``filename`` is the member's base name.
     Raises ``UploadPlugError`` on any problem; nothing is returned unless the
-    archive and every file in it passed every check.
+    archive, every file in it and the record passed every check.
     """
     if not settings.enabled:
         raise UploadPlugError("PLUG_UNREACHABLE", "no upload plug is configured")
@@ -217,7 +311,7 @@ def fetch_delivery(
             manifest = _get_manifest(client, base, headers, params)
             # Every check on the manifest runs before the archive is fetched, so an
             # over-cap or malformed delivery is refused without spending it.
-            archive_size, archive_digest, members = _check_manifest(
+            archive_size, archive_digest, members, record = _check_manifest(
                 manifest,
                 max_files=max_files,
                 max_file_bytes=max_file_bytes,
@@ -228,7 +322,7 @@ def fetch_delivery(
             )
     except httpx.HTTPError as exc:
         raise UploadPlugError("PLUG_UNREACHABLE", "the upload plug could not be reached") from None
-    return _unzip_members(archive, members)
+    return _unzip_members(archive, members, record)
 
 
 def _raise_for_status(response: httpx.Response) -> None:
@@ -252,7 +346,7 @@ def _get_manifest(client: httpx.Client, url: str, headers: dict, params: dict) -
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an unreadable manifest") from None
     if not isinstance(manifest, dict) or manifest.get("contract") != CONTRACT_VERSION:
         raise UploadPlugError("CONTRACT_MISMATCH", "the upload plug uses a different contract version")
-    if set(manifest) != {"contract", "archive", "members"}:
+    if set(manifest) != {"contract", "archive", "members", "record"}:
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid manifest")
     return manifest
 
@@ -263,8 +357,9 @@ def _check_manifest(
     max_files: int,
     max_file_bytes: int,
     max_total_bytes: int,
-) -> tuple[int, str, list[tuple[str, str, str, int, str]]]:
-    """Return the archive size and hash and ``(path, name, mime, size, sha256)`` per member."""
+) -> tuple[int, str, list[tuple[str, str, str, int, str]], tuple[int, str]]:
+    """Return the archive size and hash, ``(path, name, mime, size, sha256)`` per member and the
+    record's ``(size, sha256)``."""
     entries = manifest.get("members")
     if not isinstance(entries, list) or not entries:
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned no files")
@@ -301,6 +396,22 @@ def _check_manifest(
         checked.append((path, name, mime, size, digest))
     _unique_names([name for _path, name, _mime, _size, _digest in checked])
 
+    record = manifest.get("record")
+    if not isinstance(record, dict) or set(record) != {"path", "mime", "size", "sha256"}:
+        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid manifest")
+    record_size = record.get("size")
+    record_digest = record.get("sha256")
+    if (
+        record.get("path") != _RECORD_PATH
+        or record.get("mime") != _RECORD_MIME
+        or isinstance(record_size, bool)
+        or not isinstance(record_size, int)
+        or not 0 < record_size <= _MAX_RECORD_BYTES
+        or not isinstance(record_digest, str)
+        or not _SHA256_RE.fullmatch(record_digest)
+    ):
+        raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid record entry")
+
     archive = manifest.get("archive")
     if not isinstance(archive, dict) or set(archive) != {"size", "sha256"}:
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid manifest")
@@ -312,10 +423,10 @@ def _check_manifest(
         raise UploadPlugError("PLUG_REJECTED", "the upload plug returned an invalid checksum")
     bound = total + _ZIP_END_RECORD_BYTES + sum(
         _ZIP_ENTRY_BYTES + 2 * len(path) for path, _name, _mime, _size, _digest in checked
-    )
+    ) + record_size + _ZIP_ENTRY_BYTES + 2 * len(_RECORD_PATH)
     if archive_size > bound:
         raise UploadPlugError("PLUG_REJECTED", "the prepared archive is larger than its files allow")
-    return archive_size, archive_digest, checked
+    return archive_size, archive_digest, checked, (record_size, record_digest)
 
 
 def _get_archive(
@@ -337,10 +448,12 @@ def _get_archive(
 def _unzip_members(
     archive: bytes,
     members: list[tuple[str, str, str, int, str]],
-) -> list[tuple[str, str, bytes]]:
-    """Unzip in memory, all or nothing: the entries must be exactly the manifest's files."""
+    record: tuple[int, str],
+) -> PlugDelivery:
+    """Unzip in memory, all or nothing: the entries must be exactly the manifest's files and
+    the record. The record is validated and returned beside the files; it is never staged."""
     try:
-        return _read_members(archive, members)
+        files, body = _read_members(archive, members, record)
     except UploadPlugError:
         raise
     except Exception:
@@ -348,12 +461,22 @@ def _unzip_members(
         raise UploadPlugError(
             "PLUG_REJECTED", "the prepared archive could not be read safely"
         ) from None
+    try:
+        checked = _check_record(body)
+        summaries = _summaries(checked, members)
+    except UploadPlugError:
+        raise
+    except Exception:
+        # A value of an unexpected type must refuse, never fail the request another way.
+        raise _invalid_record() from None
+    return PlugDelivery(files=files, record=checked, summaries=summaries)
 
 
 def _read_members(
     archive: bytes,
     members: list[tuple[str, str, str, int, str]],
-) -> list[tuple[str, str, bytes]]:
+    record: tuple[int, str],
+) -> tuple[list[tuple[str, str, bytes]], bytes]:
     mismatch = UploadPlugError("PLUG_REJECTED", "the prepared archive does not match its manifest")
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         # Every entry is checked before any is read. infolist() keeps duplicates, and
@@ -376,12 +499,17 @@ def _read_members(
                     "PLUG_REJECTED", "the prepared archive uses an unsupported compression method"
                 )
         names = [entry.orig_filename for entry in entries]
-        if len(names) != len(members) or set(names) != {path for path, *_rest in members}:
+        expected = [path for path, *_rest in members] + [_RECORD_PATH]
+        # the record is the last entry; the members come in any order before it
+        if len(names) != len(expected) or set(names) != set(expected) or names[-1] != _RECORD_PATH:
             raise mismatch
         by_path = {entry.orig_filename: entry for entry in entries}
         for path, _name, _mime, size, _digest in members:
             if by_path[path].file_size != size:
                 raise mismatch
+        record_size, record_digest = record
+        if by_path[_RECORD_PATH].file_size != record_size:
+            raise mismatch
         files: list[tuple[str, str, bytes]] = []
         for path, name, mime, size, digest in members:
             with bundle.open(by_path[path]) as handle:
@@ -389,7 +517,155 @@ def _read_members(
             if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
                 raise UploadPlugError("PLUG_REJECTED", "a prepared file did not match its checksum")
             files.append((name, mime, content))
-    return files
+        with bundle.open(by_path[_RECORD_PATH]) as handle:
+            body = handle.read(record_size + 1)
+    if len(body) != record_size or hashlib.sha256(body).hexdigest() != record_digest:
+        raise UploadPlugError("PLUG_REJECTED", "the plug's record did not match its checksum")
+    return files, body
+
+
+def _invalid_record() -> UploadPlugError:
+    return UploadPlugError("PLUG_REJECTED", "the plug's record is invalid")
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [key for key, _value in pairs]
+    if len(set(keys)) != len(keys):
+        raise _invalid_record()
+    return dict(pairs)
+
+
+def _refuse_constant(_name: str) -> None:
+    raise _invalid_record()
+
+
+def _text(value: object) -> str:
+    if not isinstance(value, str) or len(value) > _MAX_RECORD_TEXT:
+        raise _invalid_record()
+    return value
+
+
+def _count(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise _invalid_record()
+    return value
+
+
+def _texts(value: object, *, max_items: int | None = None) -> list[str]:
+    if not isinstance(value, list) or (max_items is not None and len(value) > max_items):
+        raise _invalid_record()
+    return [_text(item) for item in value]
+
+
+def _code(value: object, allowed) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise _invalid_record()
+    return value
+
+
+def _object(value: object, keys: set[str]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != keys:
+        raise _invalid_record()
+    return value
+
+
+def _check_record(body: bytes) -> dict[str, Any]:
+    """Validate the record strictly: exact keys, types, closed lists of codes and bounded
+    strings. Any problem refuses the whole delivery with one fixed message."""
+    try:
+        record = json.loads(
+            body.decode("ascii"),
+            object_pairs_hook=_unique_object,
+            parse_constant=_refuse_constant,
+            parse_float=_refuse_constant,
+        )
+    except UploadPlugError:
+        raise
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise _invalid_record() from None
+    _object(record, _RECORD_KEYS)
+    if record["contract"] != CONTRACT_VERSION:
+        raise _invalid_record()
+    _code(record["method"], RECORD_METHODS)
+    for key in ("model", "prompt_version", "gate", "statement"):
+        _text(record[key])
+    # the checker's audit reference for this delivery: checked for shape, kept out of the model's context
+    if not isinstance(record["request_sha256"], str) or not _SHA256_RE.fullmatch(record["request_sha256"]):
+        raise _invalid_record()
+    _texts(record["not_sent"])
+    _texts(record["unchanged_files"])
+    if not isinstance(record["columns"], list) or not isinstance(record["risk"], list):
+        raise _invalid_record()
+    for column in record["columns"]:
+        _object(column, _COLUMN_KEYS)
+        for key in ("file", "header", "written", "note"):
+            _text(column[key])
+        _count(column["sheet"])
+        _count(column["cells_changed"])
+        _code(column["action"], RECORD_ACTIONS)
+        _code(column["source"], _RECORD_SOURCES)
+        if not isinstance(column["reason"], str) or not _REASON_RE.fullmatch(column["reason"]):
+            raise _invalid_record()
+    for row in record["risk"]:
+        _object(row, _RISK_KEYS)
+        _text(row["file"])
+        _texts(row["columns"], max_items=_MAX_RISK_COLUMNS)
+        for key in ("sheet", "rows", "classes", "unique_rows", "small_rows"):
+            _count(row[key])
+        if not isinstance(row["with_dates"], bool):
+            raise _invalid_record()
+    return record
+
+
+def _join_key(name: str) -> str:
+    """The checker's own uniqueness key for a dataset file: the name without its extension
+    (ignoring case) and the extension it is delivered with. The record names a file by its
+    path in the uploaded ZIP (``data/Visits.CSV``), the delivery by ``dataset/Visits.csv``."""
+    stem, dot, extension = name.rsplit("/", 1)[-1].rpartition(".")
+    if not dot:
+        return name.rsplit("/", 1)[-1].casefold()
+    extension = extension.lower()
+    return f"{stem.casefold()}.{_DELIVERED_EXTENSION.get(extension, extension)}"
+
+
+def _summaries(
+    record: dict[str, Any], members: list[tuple[str, str, str, int, str]]
+) -> dict[str, dict[str, Any]]:
+    """Per delivered dataset file: the method, the count of kept columns, every changed column
+    (header, action, what it now holds) and that file's uniqueness counts. Every column and
+    count row must belong to exactly one delivered dataset file, and every delivered dataset
+    file must have its columns in the record."""
+    datasets = {
+        _join_key(name): name for path, name, *_rest in members if path.startswith("dataset/")
+    }
+    summaries: dict[str, dict[str, Any]] = {
+        name: {"method": record["method"], "kept_columns": 0, "changed_columns": [], "risk": []}
+        for name in datasets.values()
+    }
+    for column in record["columns"]:
+        name = datasets.get(_join_key(column["file"]))
+        if name is None:
+            raise _invalid_record()
+        summary = summaries[name]
+        if column["action"] == "keep":
+            summary["kept_columns"] += 1
+        else:
+            summary["changed_columns"].append(
+                {
+                    "header": column["header"],
+                    "action": column["action"],
+                    "written": column["written"],
+                }
+            )
+    for row in record["risk"]:
+        name = datasets.get(_join_key(row["file"]))
+        if name is None:
+            raise _invalid_record()
+        summaries[name]["risk"].append({key: row[key] for key in sorted(_RISK_KEYS - {"file"})})
+    for summary in summaries.values():
+        if not summary["kept_columns"] and not summary["changed_columns"]:
+            raise _invalid_record()
+    return summaries
 
 
 def _read_capped(response: httpx.Response, cap: int) -> bytes:

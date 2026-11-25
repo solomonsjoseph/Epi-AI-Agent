@@ -55,18 +55,48 @@ from tools.execution_policy import PYTHON_EXECUTION_POLICY_GUIDANCE
 _MAX_CARD_COLUMNS = 100
 _MAX_CARD_VALUE_CHARS = 500
 _MAX_CARD_LIST_ITEMS = 20
+# Changed columns listed on one de-identified file's card; the rest are counted.
+_MAX_CARD_CHANGED_COLUMNS = 200
 
 # Added once to the context when any attachment card is marked deidentified (files
 # pulled through the upload plug). Fixed text: nothing in it comes from the data.
 DEIDENTIFIED_ATTACHMENTS_NOTE = (
-    "Attachments marked deidentified were de-identified by the upload checker, "
-    "which can miss some identifiers, names especially. If an identifier remains, "
-    "do not repeat it, infer from it or try to re-identify anyone. Bracketed "
-    "tokens such as [NAME] or [DATE] are placeholders for removed values: treat "
-    "them as removed, not as missing or corrupt data, and do not try to "
-    "reconstruct them. Date columns may hold day offsets from each participant's "
-    "first date instead of calendar dates, and ID columns should hold study IDs."
+    "Attachments marked deidentified were de-identified by the upload checker "
+    "before this app received them. The checker can miss an identifier, names "
+    "especially: if one remains, do not repeat it, infer from it or try to "
+    "re-identify anyone. Dataset cards list each changed column with what it now "
+    "holds; that text governs. Columns listed as NAME, ADDRESS, PHONE, EMAIL, ID, "
+    "FREE_TEXT or REDACTED hold that word in every filled cell: treat them as "
+    "removed, not as data. A PARTICIPANT_ID column holds random study codes that "
+    "link the same participant across the uploaded files. Under Safe Harbor, date "
+    "columns hold the year only. Under Expert Determination, each participant's "
+    "dates are shifted by the same hidden number of days, so intervals within a "
+    "participant are exact, but calendar dates, seasons and comparisons of "
+    "absolute dates between participants are not. A date cell reading DATE was "
+    "removed. Ages of 90 and over read 90+. ZIP codes are 3 digits. The "
+    "dictionary and forms are unchanged and may describe columns whose values "
+    "were removed."
 )
+# Fixed card words for the plug record's actions and methods; nothing else from the
+# record reaches the model (no reasons, notes, statement, model name or counts table).
+_DEIDENTIFIED_ACTION_WORDS = {
+    "name": "NAME",
+    "address": "ADDRESS",
+    "phone": "PHONE",
+    "email": "EMAIL",
+    "identifier": "ID",
+    "participant_id": "PARTICIPANT_ID",
+    "date": "DATE",
+    "birth_date": "BIRTH_DATE",
+    "age": "AGE",
+    "zip": "ZIP",
+    "free_text": "FREE_TEXT",
+    "redacted": "REDACTED",
+}
+_DEIDENTIFIED_METHOD_WORDS = {
+    "safe_harbor": "Safe Harbor",
+    "expert_determination": "Expert Determination",
+}
 
 
 GENERAL_CORE_INSTRUCTIONS = """You are the single reasoning owner for
@@ -265,6 +295,11 @@ def build_epi_agent_context_prompt(
             "current_turn": attachment_id in current_attachment_ids,
             "inspection": inspection_card or None,
             "deidentified": True if attachment.get("deidentified") is True else None,
+            "deidentification": (
+                _deidentification_card(attachment.get("deidentification"))
+                if attachment.get("deidentified") is True
+                else None
+            ),
         }
         cards.append(
             {
@@ -414,6 +449,60 @@ def _bounded_text(value: object) -> str:
     if len(text) <= _MAX_CARD_VALUE_CHARS:
         return text
     return text[: _MAX_CARD_VALUE_CHARS - 3] + "..."
+
+
+def _deidentification_card(value: object) -> dict[str, Any] | None:
+    """The plug record's summary for one de-identified dataset file: the method, the count of
+    kept columns and each changed column's header, fixed action word and written text (at most
+    _MAX_CARD_CHANGED_COLUMNS, the rest counted). Keys are picked one by one, so nothing else
+    stored with the summary reaches the model."""
+    if not isinstance(value, dict):
+        return None
+    method_code = value.get("method")
+    method = (
+        _DEIDENTIFIED_METHOD_WORDS.get(method_code)
+        if isinstance(method_code, str)
+        else None
+    )
+    kept = value.get("kept_columns")
+    changed = value.get("changed_columns")
+    if (
+        method is None
+        or isinstance(kept, bool)
+        or not isinstance(kept, int)
+        or kept < 0
+        or not isinstance(changed, list)
+    ):
+        return None
+    columns: list[dict[str, str]] = []
+    for column in changed:
+        if not isinstance(column, dict):
+            return None
+        action_code = column.get("action")
+        action = (
+            _DEIDENTIFIED_ACTION_WORDS.get(action_code)
+            if isinstance(action_code, str)
+            else None
+        )
+        header = column.get("header")
+        written = column.get("written")
+        if action is None or not isinstance(header, str) or not isinstance(written, str):
+            return None
+        columns.append(
+            {
+                "header": _bounded_text(header),
+                "action": action,
+                "written": _bounded_text(written),
+            }
+        )
+    card: dict[str, Any] = {
+        "method": method,
+        "kept_columns": kept,
+        "changed_columns": columns[:_MAX_CARD_CHANGED_COLUMNS],
+    }
+    if len(columns) > _MAX_CARD_CHANGED_COLUMNS:
+        card["changed_columns_not_listed"] = len(columns) - _MAX_CARD_CHANGED_COLUMNS
+    return card
 
 
 def _bounded_timestamp(value: object) -> str:

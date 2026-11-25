@@ -37,6 +37,7 @@ class FakeRuntime:
         default_factory=list
     )
     deidentified: list[bool] = field(default_factory=list)
+    deidentification: list[dict | None] = field(default_factory=list)
 
     def authorize_thread(self, identity, thread_id: str) -> None:
         if thread_id != THREAD_ID:
@@ -45,9 +46,12 @@ class FakeRuntime:
     def runtime_info(self) -> RuntimeInfo:
         return RuntimeInfo(model_name="fake-model")
 
-    def stage_attachments(self, identity, thread_id, uploads, *, deidentified=False):
+    def stage_attachments(
+        self, identity, thread_id, uploads, *, deidentified=False, deidentification=None
+    ):
         self.staged.append((thread_id, list(uploads)))
         self.deidentified.append(deidentified)
+        self.deidentification.append(deidentification)
         return AttachmentUploadResult(
             attachments=[
                 AttachmentManifestSummary.model_validate(
@@ -81,6 +85,7 @@ def runtime() -> FakeRuntime:
 def client(runtime: FakeRuntime, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_URL", raising=False)
     monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_SECRET", raising=False)
+    monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_REQUIRED", raising=False)
     return TestClient(create_app(runtime, provider_api_key="unused"))
 
 
@@ -137,10 +142,20 @@ DATASET = b"id,year,visit\n" + b"".join(
 DICTIONARY = json.dumps(
     {"variables": [{"name": "year", "label": "Year of visit"}] * 40}
 ).encode()
+# Contract 4: dictionary, forms and metadata arrive byte for byte as uploaded, so a PDF form
+# arrives as a PDF. Staging needs only its signature.
+FORM_PDF = b"%PDF-1.4\n% synthetic blank form\n" + b"0" * 64 + b"\n%%EOF\n"
+# Contract 4 keeps the researcher's own file names (spaces, parentheses and all).
+DATASET_PATH = "dataset/Riverbend Heart (v2)_DATA.csv"
+DATASET_NAME = "Riverbend Heart (v2)_DATA.csv"
+# What the record names the same file by: its path in the uploaded ZIP.
+UPLOADED_DATASET_PATH = "data/Riverbend Heart (v2)_DATA.CSV"
 MEMBERS = [
-    ("dataset/dataset_1.csv", "text/csv", DATASET),
-    ("dictionary/dictionary_1.json", "application/json", DICTIONARY),
+    (DATASET_PATH, "text/csv", DATASET),
+    ("dictionary/Data Dictionary.json", "application/json", DICTIONARY),
+    ("forms/baseline_crf_blank.pdf", "application/pdf", FORM_PDF),
 ]
+STAGED_NAMES = [DATASET_NAME, "Data Dictionary.json", "baseline_crf_blank.pdf"]
 FIXED_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -157,19 +172,103 @@ def _zip(entries, *, method=zipfile.ZIP_DEFLATED) -> bytes:
     return buffer.getvalue()
 
 
-def _member_zip(members=MEMBERS, *, method=zipfile.ZIP_DEFLATED) -> bytes:
-    return _zip([(path, content) for path, _mime, content in members], method=method)
+RECORD_PATH = "record/columns.json"
 
 
-def _size_bound(members) -> int:
-    """v1_design 15.2: sum(sizes) + 22 + sum(76 + 2 * len(path))."""
-    return sum(len(content) for _path, _mime, content in members) + 22 + sum(
-        76 + 2 * len(path) for path, _mime, _content in members
-    )
+def _column(file: str, header: str, action: str = "keep", written: str = "unchanged", **override) -> dict:
+    """One record column, as the checker writes it (header and fixed words only)."""
+    return {
+        "action": action,
+        "cells_changed": 0 if action == "keep" else 200,
+        "file": file,
+        "header": header,
+        "note": "",
+        "reason": "model_choice",
+        "sheet": 0,
+        "source": "model",
+        "written": written,
+        **override,
+    }
 
 
-def _manifest(members=MEMBERS, archive: bytes | None = None, contract="2") -> dict:
-    archive = _member_zip(members) if archive is None else archive
+def _risk(file: str, **override) -> dict:
+    return {
+        "classes": 3,
+        "columns": ["visit"],
+        "file": file,
+        "rows": 200,
+        "sheet": 0,
+        "small_rows": 0,
+        "unique_rows": 0,
+        "with_dates": False,
+        **override,
+    }
+
+
+def _uploaded(path: str) -> str:
+    # the record names each dataset by its path in the uploaded ZIP: here a "data" folder
+    return UPLOADED_DATASET_PATH if path == DATASET_PATH else path
+
+
+def _record_body(members=MEMBERS, **override) -> dict:
+    """Contract 4: the checker's per-column record for ``members``."""
+    columns: list[dict] = []
+    risk: list[dict] = []
+    for path, _mime, _content in members:
+        if path.startswith("dataset/"):
+            file = _uploaded(path)
+            columns += [
+                _column(
+                    file,
+                    "id",
+                    "participant_id",
+                    "a random study code per participant",
+                    reason="header_participant_id",
+                    source="header",
+                ),
+                _column(file, "year"),
+                _column(file, "visit"),
+            ]
+            risk.append(_risk(file))
+    return {
+        "columns": columns,
+        "contract": "4",
+        "gate": "0.44.0",
+        "method": "safe_harbor",
+        "model": "test-model",
+        "not_sent": ["README.txt"],
+        "prompt_version": "2026-11-25.1",
+        "request_sha256": "ab" * 32,
+        "risk": risk,
+        "statement": "Columns were changed as listed, following the HIPAA Safe Harbor identifier list.",
+        "unchanged_files": [path for path, _m, _c in members if not path.startswith("dataset/")],
+        **override,
+    }
+
+
+def _encode(body) -> bytes:
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
+def _record(members=MEMBERS, **override) -> bytes:
+    return _encode(_record_body(members, **override))
+
+
+def _member_zip(members=MEMBERS, *, method=zipfile.ZIP_DEFLATED, record: bytes | None = None) -> bytes:
+    record = _record(members) if record is None else record
+    return _zip([(path, content) for path, _mime, content in members] + [(RECORD_PATH, record)], method=method)
+
+
+def _size_bound(members, record: bytes | None = None) -> int:
+    """v1_design 15.2: sum(sizes) + 22 + sum(76 + 2 * len(path)), the record counted as an entry."""
+    record = _record(members) if record is None else record
+    entries = [(path, content) for path, _mime, content in members] + [(RECORD_PATH, record)]
+    return sum(len(content) for _path, content in entries) + 22 + sum(76 + 2 * len(path) for path, _c in entries)
+
+
+def _manifest(members=MEMBERS, archive: bytes | None = None, contract="4", record: bytes | None = None) -> dict:
+    record = _record(members) if record is None else record
+    archive = _member_zip(members, record=record) if archive is None else archive
     return {
         "contract": contract,
         "archive": {
@@ -185,6 +284,12 @@ def _manifest(members=MEMBERS, archive: bytes | None = None, contract="2") -> di
             }
             for path, mime, content in members
         ],
+        "record": {
+            "path": RECORD_PATH,
+            "mime": "application/json",
+            "size": len(record),
+            "sha256": hashlib.sha256(record).hexdigest(),
+        },
     }
 
 
@@ -201,7 +306,7 @@ def _patch_first_entry(
 
 
 class FakePlug:
-    """A contract-2 plug: the manifest at the delivery URL, the ZIP at ``/archive``."""
+    """A contract-4 plug: the manifest at the delivery URL, the ZIP at ``/archive``."""
 
     def __init__(
         self,
@@ -268,7 +373,7 @@ def test_plug_on_reports_origin_only() -> None:
     limits = AttachmentLimits()
     assert client.get("/api/upload-plug").json() == {
         "origin": PLUG_URL,
-        "contract": "2",
+        "contract": "4",
         "caps": {
             "max_files": limits.max_files_per_message,
             "max_file_bytes": limits.max_bytes,
@@ -298,30 +403,28 @@ def test_plug_on_refuses_plain_upload() -> None:
     assert runtime.staged == []
 
 
-def test_plug_pull_unzips_and_stages_members_by_basename() -> None:
+def test_plug_pull_unzips_and_stages_members_under_their_uploaded_names() -> None:
     runtime = FakeRuntime()
     plug = FakePlug()
     response = _pull(_plug_client(runtime, plug))
     assert response.status_code == 200
-    assert [a["filename"] for a in response.json()["attachments"]] == [
-        "dataset_1.csv",
-        "dictionary_1.json",
-    ]
+    assert [a["filename"] for a in response.json()["attachments"]] == STAGED_NAMES
     assert runtime.staged == [
         (
             THREAD_ID,
             [
-                ("dataset_1.csv", "text/csv", DATASET),
-                ("dictionary_1.json", "application/json", DICTIONARY),
+                (DATASET_NAME, "text/csv", DATASET),
+                ("Data Dictionary.json", "application/json", DICTIONARY),
+                ("baseline_crf_blank.pdf", "application/pdf", FORM_PDF),
             ],
         )
     ]
-    # Contract 2 only: the manifest, then the one archive; never the per-file route.
+    # Contract 4 only: the manifest, then the one archive; never the per-file route.
     assert [r.url.path for r in plug.requests] == [
         f"/v1/deliveries/{HANDLE}",
         f"/v1/deliveries/{HANDLE}/archive",
     ]
-    assert all(r.headers["x-gate-contract"] == "2" for r in plug.requests)
+    assert all(r.headers["x-gate-contract"] == "4" for r in plug.requests)
     assert all(r.url.params["thread_id"] == THREAD_ID for r in plug.requests)
 
 
@@ -330,7 +433,39 @@ def test_plug_pull_stages_files_flagged_deidentified() -> None:
     response = _pull(_plug_client(runtime, FakePlug()))
     assert response.status_code == 200
     assert runtime.deidentified == [True]
-    assert [a["deidentified"] for a in response.json()["attachments"]] == [True, True]
+    assert [a["deidentified"] for a in response.json()["attachments"]] == [True, True, True]
+
+
+def test_plug_pull_passes_each_dataset_its_record_summary() -> None:
+    runtime = FakeRuntime()
+    assert _pull(_plug_client(runtime, FakePlug())).status_code == 200
+    # Keyed by staged file name; only dataset files have one.
+    assert runtime.deidentification == [
+        {
+            DATASET_NAME: {
+                "method": "safe_harbor",
+                "kept_columns": 2,
+                "changed_columns": [
+                    {
+                        "header": "id",
+                        "action": "participant_id",
+                        "written": "a random study code per participant",
+                    }
+                ],
+                "risk": [
+                    {
+                        "classes": 3,
+                        "columns": ["visit"],
+                        "rows": 200,
+                        "sheet": 0,
+                        "small_rows": 0,
+                        "unique_rows": 0,
+                        "with_dates": False,
+                    }
+                ],
+            }
+        }
+    ]
 
 
 def test_plain_upload_is_never_flagged_even_if_the_form_asks(
@@ -340,32 +475,42 @@ def test_plain_upload_is_never_flagged_even_if_the_form_asks(
     response = client.post(
         f"/api/threads/{THREAD_ID}/attachments",
         files=[("files", ("study.csv", b"a,b\n1,2\n", "text/csv"))],
-        data={"deidentified": "true"},
+        data={"deidentified": "true", "deidentification": json.dumps({"method": "safe_harbor"})},
     )
     assert response.status_code == 200
     assert runtime.deidentified == [False]
+    assert runtime.deidentification == [None]
     assert response.json()["attachments"][0]["deidentified"] is False
 
 
-def test_plug_request_refuses_a_deidentified_field() -> None:
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"deidentified": True},
+        {"record": {"contract": "4", "columns": []}},
+        {"deidentification": {"method": "safe_harbor", "kept_columns": 0, "changed_columns": []}},
+    ],
+)
+def test_plug_request_refuses_client_supplied_fields(extra: dict) -> None:
     runtime = FakeRuntime()
     plug = FakePlug()
     response = _plug_client(runtime, plug).post(
         f"/api/threads/{THREAD_ID}/plug-attachments",
-        json={"handle": HANDLE, "deidentified": True},
+        json={"handle": HANDLE, **extra},
     )
     assert response.status_code == 422
     assert plug.requests == []
     assert runtime.staged == []
 
 
-def test_message_request_refuses_a_deidentified_field(client: TestClient) -> None:
+@pytest.mark.parametrize("field_name", ["deidentified", "record", "deidentification"])
+def test_message_request_refuses_client_supplied_fields(client: TestClient, field_name: str) -> None:
     response = client.post(
         f"/api/threads/{THREAD_ID}/messages",
-        json={"text": "hello", "attachment_ids": [], "deidentified": True},
+        json={"text": "hello", "attachment_ids": [], field_name: True},
     )
     assert response.status_code == 422
-    assert "deidentified" in json.dumps(response.json())
+    assert field_name in json.dumps(response.json())
 
 
 def test_plug_pull_accepts_a_stored_archive_at_the_size_bound() -> None:
@@ -374,21 +519,15 @@ def test_plug_pull_accepts_a_stored_archive_at_the_size_bound() -> None:
     runtime = FakeRuntime()
     response = _pull(_plug_client(runtime, FakePlug(archive=archive)))
     assert response.status_code == 200
-    assert [name for name, _mime, _content in runtime.staged[0][1]] == [
-        "dataset_1.csv",
-        "dictionary_1.json",
-    ]
+    assert [name for name, _mime, _content in runtime.staged[0][1]] == STAGED_NAMES
 
 
 def test_plug_pull_stages_in_manifest_order_whatever_the_archive_order() -> None:
     runtime = FakeRuntime()
-    archive = _member_zip(list(reversed(MEMBERS)))
+    archive = _member_zip(list(reversed(MEMBERS)), record=_record(MEMBERS))
     response = _pull(_plug_client(runtime, FakePlug(archive=archive)))
     assert response.status_code == 200
-    assert [name for name, _mime, _content in runtime.staged[0][1]] == [
-        "dataset_1.csv",
-        "dictionary_1.json",
-    ]
+    assert [name for name, _mime, _content in runtime.staged[0][1]] == STAGED_NAMES
 
 
 @pytest.mark.parametrize(
@@ -430,25 +569,32 @@ def _with_paths(*paths: object) -> dict:
 @pytest.mark.parametrize(
     "path",
     [
-        "data/dataset_1.csv",
-        "dataset/form_1.csv",
-        "forms/forms_1.json",
-        "dictionary/dataset_1.csv",
-        "metadata/dictionary_1.md",
-        "dataset/dataset_0.csv",
-        "dataset/dataset_01.csv",
-        "dataset/dataset_10000.csv",
-        "dataset/dataset_1.pdf",
-        "dataset/dataset_1.CSV",
-        "Dataset/dataset_1.csv",
-        "dataset/dataset_1.csv\n",
-        "dataset/dataset_1.csv/",
-        "dataset_1.csv",
-        "study/dataset/dataset_1.csv",
-        "/dataset/dataset_1.csv",
-        "dataset/../dataset_1.csv",
-        "dataset\\dataset_1.csv",
-        "dataset//dataset_1.csv",
+        "data/visits.csv",
+        "form/visits.pdf",
+        "Dataset/visits.csv",
+        "record/columns.json",
+        "report/report.json",
+        "dataset/.visits.csv",
+        "dataset/ visits.csv",
+        "dataset/-visits.csv",
+        "dataset/visits.CSV",
+        "dataset/visits.xls",
+        "dataset/visits.png",
+        "dataset/visits.zip",
+        "dataset/visits",
+        "dataset/visits.csv ",
+        "dataset/visits.csv\n",
+        "dataset/vis\tits.csv",
+        "dataset/caf\u00e9.csv",
+        "dataset/" + "a" * 201 + ".csv",
+        "dataset/visits.csv/",
+        "visits.csv",
+        "study/dataset/visits.csv",
+        "/dataset/visits.csv",
+        "dataset/../visits.csv",
+        "dataset\\visits.csv",
+        "dataset/sub\\visits.csv",
+        "dataset//visits.csv",
         "",
         5,
         None,
@@ -460,30 +606,62 @@ def test_plug_bad_path_is_refused_before_fetch(path: object) -> None:
     assert not plug.archive_requested
 
 
+@pytest.mark.parametrize(
+    "path, mime",
+    [
+        ("dataset/Riverbend Heart (v2)_DATA.csv", "text/csv"),
+        ("dataset/(draft) visits [v3] ~final.tsv", "text/tab-separated-values"),
+        ("dataset/" + "a" * 200 + ".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        ("forms/Baseline CRF, blank.pdf", "application/pdf"),
+        ("dictionary/Data Dictionary 2025-02-10.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        ("metadata/README.md", "text/markdown"),
+        ("metadata/study.xml", "application/xml"),
+        ("metadata/notes.txt", "text/plain"),
+    ],
+)
+def test_plug_uploaded_file_names_are_staged_as_they_are(path: str, mime: str) -> None:
+    content = DATASET if path.startswith("dataset/") else b"synthetic content\n"
+    members = [(path, mime, content)]
+    if not path.startswith("dataset/"):
+        members = [MEMBERS[0], *members]
+    runtime = FakeRuntime()
+    response = _pull(_plug_client(runtime, FakePlug(members)))
+    assert response.status_code == 200, response.text
+    assert [name for name, _mime, _content in runtime.staged[0][1]][-1] == path.split("/", 1)[1]
+
+
 def test_plug_duplicate_path_is_refused_before_fetch() -> None:
-    plug = FakePlug(manifest=_with_paths("dataset/dataset_1.csv", "dataset/dataset_1.csv"))
+    plug = FakePlug(manifest=_with_paths(DATASET_PATH, DATASET_PATH))
     assert _refused(plug).startswith("PLUG_REJECTED")
     assert not plug.archive_requested
 
 
-def test_plug_basenames_equal_ignoring_case_are_refused_before_fetch() -> None:
-    plug = FakePlug(manifest=_with_paths("dataset/dataset_1.csv", "dataset/DATASET_1.csv"))
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ("dataset/visits.csv", "dataset/VISITS.csv"),
+        # unique ignoring case across the whole delivery, not only within a folder
+        ("dataset/visits.csv", "metadata/Visits.csv"),
+    ],
+)
+def test_plug_names_equal_ignoring_case_are_refused_before_fetch(paths) -> None:
+    plug = FakePlug(manifest=_with_paths(*paths))
     assert _refused(plug).startswith("PLUG_REJECTED")
     assert not plug.archive_requested
 
 
 def test_plug_basename_check_ignores_case() -> None:
-    # The path pattern is lowercase only; the name check still holds on its own.
+    # The path pattern allows upper case; the name check still holds on its own.
     from utils.upload_plug import UploadPlugError, _unique_names
 
-    _unique_names(["dataset_1.csv", "dataset_2.csv"])
+    _unique_names(["visits.csv", "visits_2.csv"])
     with pytest.raises(UploadPlugError) as caught:
-        _unique_names(["dataset_1.csv", "DATASET_1.csv"])
+        _unique_names(["Visits.csv", "VISITS.csv"])
     assert caught.value.code == "PLUG_REJECTED"
 
 
 def _many_members(count: int) -> list[tuple[str, str, bytes]]:
-    return [(f"dataset/dataset_{i}.csv", "text/csv", b"a\n1\n") for i in range(1, count + 1)]
+    return [(f"dataset/visits {i}.csv", "text/csv", b"a\n1\n") for i in range(1, count + 1)]
 
 
 @pytest.mark.parametrize(
@@ -492,7 +670,9 @@ def _many_members(count: int) -> list[tuple[str, str, bytes]]:
         (AttachmentLimits(), _many_members(11), "TOO_MANY_FILES"),
         (AttachmentLimits(max_bytes=len(DATASET) - 1), MEMBERS, "FILE_TOO_LARGE"),
         (
-            AttachmentLimits(max_message_bytes=len(DATASET) + len(DICTIONARY) - 1),
+            AttachmentLimits(
+                max_message_bytes=len(DATASET) + len(DICTIONARY) + len(FORM_PDF) - 1
+            ),
             MEMBERS,
             "MESSAGE_ATTACHMENTS_TOO_LARGE",
         ),
@@ -510,6 +690,17 @@ def test_plug_archive_larger_than_the_size_bound_is_not_fetched() -> None:
     manifest["archive"]["size"] = _size_bound(MEMBERS) + 1
     plug = FakePlug(manifest=manifest)
     assert _refused(plug).startswith("PLUG_REJECTED")
+    assert not plug.archive_requested
+
+
+def test_plug_size_bound_counts_the_record_entry() -> None:
+    # A bigger record raises the bound by its size, its two headers and twice its path.
+    small, big = _record(), _record(model="m" * 1000)
+    assert _size_bound(MEMBERS, big) - _size_bound(MEMBERS, small) == len(big) - len(small)
+    manifest = _manifest(record=big)
+    manifest["archive"]["size"] = _size_bound(MEMBERS, big) + 1
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug) == "PLUG_REJECTED: the prepared archive is larger than its files allow"
     assert not plug.archive_requested
 
 
@@ -536,7 +727,7 @@ def test_plug_malformed_manifest_is_not_fetched(change) -> None:
     assert not plug.archive_requested
 
 
-@pytest.mark.parametrize("contract", ["1", 2, "2.0", None])
+@pytest.mark.parametrize("contract", ["1", "3", 4, "4.0", None])
 def test_plug_manifest_on_another_contract_is_a_mismatch(contract) -> None:
     manifest = _manifest()
     if contract is None:
@@ -550,7 +741,7 @@ def test_plug_manifest_on_another_contract_is_a_mismatch(contract) -> None:
 
 @pytest.mark.parametrize("on_archive", [False, True])
 def test_plug_409_is_a_fixed_contract_mismatch(on_archive: bool) -> None:
-    body = b"gate says: dataset/dataset_1.csv contract 1 only"
+    body = f"gate says: {DATASET_PATH} contract 3 only".encode()
     plug = (
         FakePlug(archive_status=409, body=body)
         if on_archive
@@ -577,8 +768,10 @@ def _archive_refusal(archive: bytes, members=MEMBERS) -> str:
     return detail
 
 
-def _stored_one(name: str = "dataset/dataset_1.csv", content: bytes = DATASET) -> bytes:
-    return _zip([(name, content)], method=zipfile.ZIP_STORED)
+def _stored_one(name: str = DATASET_PATH, content: bytes = DATASET) -> bytes:
+    # the record (contract 4) follows the member, so the member stays the first entry
+    record = _record([(DATASET_PATH, "text/csv", content)])
+    return _zip([(name, content), (RECORD_PATH, record)], method=zipfile.ZIP_STORED)
 
 
 ONE = MEMBERS[:1]
@@ -587,11 +780,11 @@ ONE = MEMBERS[:1]
 @pytest.mark.parametrize(
     "entries",
     [
-        pytest.param([*MEMBERS, ("metadata/metadata_1.txt", "", b"x")], id="extra"),
+        pytest.param([*MEMBERS, ("metadata/notes.txt", "", b"x")], id="extra"),
         pytest.param(MEMBERS[:1], id="missing"),
         pytest.param([*MEMBERS, MEMBERS[0]], id="duplicate"),
         pytest.param([*MEMBERS, ("dataset/", "", b"")], id="directory"),
-        pytest.param([*MEMBERS, ("/dataset/dataset_1.csv", "", b"x")], id="absolute"),
+        pytest.param([*MEMBERS, ("/" + DATASET_PATH, "", b"x")], id="absolute"),
         pytest.param([*MEMBERS, ("dataset/../x.csv", "", b"x")], id="dotdot"),
         pytest.param([*MEMBERS, ("dataset\\x.csv", "", b"x")], id="backslash"),
     ],
@@ -605,7 +798,7 @@ def test_plug_archive_entries_must_equal_the_manifest(entries) -> None:
 
 def test_plug_entry_name_with_a_nul_byte_is_refused() -> None:
     # zipfile cuts filename at a NUL, which would make it equal the manifest path.
-    name = "dataset/dataset_1.csv"
+    name = DATASET_PATH
     archive = _zip([(name + "Z", DATASET)])
     archive = _patch_first_entry(archive, 30 + len(name), 46 + len(name), b"\x00")
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
@@ -621,7 +814,7 @@ def test_plug_encrypted_entry_is_refused() -> None:
 
 
 def test_plug_other_compression_is_refused() -> None:
-    archive = _zip([("dataset/dataset_1.csv", DATASET, zipfile.ZIP_BZIP2)])
+    archive = _zip([(DATASET_PATH, DATASET, zipfile.ZIP_BZIP2)])
     assert len(archive) <= _size_bound(ONE)
     detail = _archive_refusal(archive, ONE)
     assert detail == (
@@ -630,7 +823,7 @@ def test_plug_other_compression_is_refused() -> None:
 
 
 def test_plug_entry_size_differing_from_the_manifest_is_refused() -> None:
-    archive = _zip([("dataset/dataset_1.csv", DATASET + b"S999,2020,0\n")])
+    archive = _zip([(DATASET_PATH, DATASET + b"S999,2020,0\n")])
     detail = _archive_refusal(archive, ONE)
     assert detail == "PLUG_REJECTED: the prepared archive does not match its manifest"
 
@@ -638,7 +831,8 @@ def test_plug_entry_size_differing_from_the_manifest_is_refused() -> None:
 def test_plug_entry_hash_differing_from_the_manifest_is_refused() -> None:
     tampered = DATASET.replace(b"S007", b"S070", 1)
     assert len(tampered) == len(DATASET)
-    detail = _archive_refusal(_zip([("dataset/dataset_1.csv", tampered)]), ONE)
+    archive = _zip([(DATASET_PATH, tampered), (RECORD_PATH, _record(ONE))])
+    detail = _archive_refusal(archive, ONE)
     assert detail == "PLUG_REJECTED: a prepared file did not match its checksum"
 
 
@@ -658,6 +852,9 @@ def test_plug_archive_longer_than_declared_is_refused() -> None:
     assert _refused(plug) == "PLUG_REJECTED: the upload plug sent more data than declared"
 
 
+OTHER_DATASET_PATH = DATASET_PATH.replace("(v2)", "(v3)")
+
+
 @pytest.mark.parametrize(
     "archive",
     [
@@ -666,7 +863,7 @@ def test_plug_archive_longer_than_declared_is_refused() -> None:
         pytest.param(_patch_first_entry(_stored_one(), 14, 16, b"\x00\x00\x00\x00"), id="crc"),
         # Local header name differs from the central directory: zipfile echoes both names.
         pytest.param(
-            _patch_first_entry(_stored_one(), 30, None, b"dataset/dataset_2.csv"),
+            _patch_first_entry(_stored_one(), 30, None, OTHER_DATASET_PATH.encode()),
             id="header-name",
         ),
         pytest.param(_stored_one()[: len(_stored_one()) // 2], id="truncated"),
@@ -693,7 +890,7 @@ def test_plug_zipfile_error_is_not_chained() -> None:
     assert caught.value.code == "PLUG_REJECTED"
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__
-    assert "dataset_1" not in str(caught.value)
+    assert "Riverbend" not in str(caught.value)
 
 
 def test_plug_unreachable_is_502_and_stages_nothing() -> None:
@@ -730,9 +927,15 @@ def test_plug_partial_staging_is_rolled_back() -> None:
     class PartialRuntime(FakeRuntime):
         discarded: list[str] = []
 
-        def stage_attachments(self, identity, thread_id, uploads, *, deidentified=False):
+        def stage_attachments(
+            self, identity, thread_id, uploads, *, deidentified=False, deidentification=None
+        ):
             result = super().stage_attachments(
-                identity, thread_id, uploads[:1], deidentified=deidentified
+                identity,
+                thread_id,
+                uploads[:1],
+                deidentified=deidentified,
+                deidentification=deidentification,
             )
             result.errors.append(
                 {"filename": uploads[1][0], "code": "UNSUPPORTED_FORMAT", "message": "x"}
@@ -770,12 +973,10 @@ def test_half_configured_plug_refuses_to_start(url: str, secret: str) -> None:
         )
 
 
-def test_plug_on_refuses_plain_upload_before_reading_the_body() -> None:
-    """Raw bytes must never reach the app process: the 409 comes before any body is read."""
+def _refuses_before_reading_the_body(app) -> list[dict]:
+    """Send a plain upload straight to the ASGI app; any read of the body fails the test."""
     import asyncio
 
-    runtime = FakeRuntime()
-    app = _plug_client(runtime, FakePlug()).app
     scope = {
         "type": "http", "method": "POST", "path": f"/api/threads/{THREAD_ID}/attachments",
         "raw_path": f"/api/threads/{THREAD_ID}/attachments".encode(), "query_string": b"",
@@ -792,6 +993,13 @@ def test_plug_on_refuses_plain_upload_before_reading_the_body() -> None:
         sent.append(message)
 
     asyncio.run(app(scope, receive, send))
+    return sent
+
+
+def test_plug_on_refuses_plain_upload_before_reading_the_body() -> None:
+    """Raw bytes must never reach the app process: the 409 comes before any body is read."""
+    runtime = FakeRuntime()
+    sent = _refuses_before_reading_the_body(_plug_client(runtime, FakePlug()).app)
     assert sent[0]["status"] == 409
     assert runtime.staged == []
 
@@ -847,8 +1055,10 @@ def test_plug_pull_logs_no_handle_secret_or_thread(caplog) -> None:
     text = caplog.text + json.dumps(response.json())
     assert SECRET not in text
     assert HANDLE not in caplog.text
-    # Nothing from the archive is logged: no member paths, contents or hashes.
+    # Nothing from the archive is logged: no member paths, contents, record or hashes.
     assert "dataset/" not in caplog.text
+    assert "Riverbend" not in caplog.text
+    assert "participant_id" not in caplog.text
     assert "S001" not in caplog.text
     assert hashlib.sha256(DATASET).hexdigest() not in caplog.text
 
@@ -859,7 +1069,7 @@ def test_plug_refusal_logs_no_archive_detail(caplog) -> None:
     caplog.set_level(logging.DEBUG)
     archive = _patch_first_entry(_stored_one(), 14, 16, b"\x00\x00\x00\x00")
     _archive_refusal(archive, ONE)
-    assert "dataset_1" not in caplog.text
+    assert "Riverbend" not in caplog.text
     assert "CRC" not in caplog.text
 
 
@@ -869,8 +1079,10 @@ def test_plug_refusal_logs_no_archive_detail(caplog) -> None:
 
 def test_plug_size_bound_matches_the_checker_formula() -> None:
     # The same example is pinned in the gate's tests: one 100-byte member at
-    # dataset/dataset_1.csv (21 characters) gives 100 + 22 + 76 + 42 = 240.
-    assert _size_bound([("dataset/dataset_1.csv", "text/csv", b"x" * 100)]) == 240
+    # dataset/dataset_1.csv (21 characters) gives 100 + 22 + 76 + 42 = 240. Contract 4 adds the
+    # record as one more entry: a 50-byte record at record/columns.json (19 characters) adds
+    # 50 + 76 + 38.
+    assert _size_bound([("dataset/dataset_1.csv", "text/csv", b"x" * 100)], record=b"y" * 50) == 240 + 50 + 76 + 38
 
 
 @pytest.mark.parametrize(
@@ -899,6 +1111,15 @@ def test_plug_media_type_must_be_the_one_written_for_the_extension(mime) -> None
     assert not plug.archive_requested
 
 
+@pytest.mark.parametrize("mime", ["application/octet-stream", "application/x-pdf", "text/plain"])
+def test_plug_pdf_member_needs_the_pdf_media_type(mime) -> None:
+    manifest = _manifest()
+    manifest["members"][2]["mime"] = mime
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug) == "PLUG_REJECTED: the upload plug returned an invalid media type"
+    assert not plug.archive_requested
+
+
 def test_plug_asks_for_no_compressed_transfer_and_refuses_one() -> None:
     plug = FakePlug()
     runtime = FakeRuntime()
@@ -917,3 +1138,426 @@ def test_plug_asks_for_no_compressed_transfer_and_refuses_one() -> None:
             return response
 
     assert _refused(GzipPlug()) == "PLUG_REJECTED: the upload plug sent an encoded response"
+
+
+# Contract 4: the per-column record is validated, kept beside the files and never staged.
+
+
+def test_plug_record_is_validated_and_never_staged() -> None:
+    runtime = FakeRuntime()
+    response = _pull(_plug_client(runtime, FakePlug()))
+    assert response.status_code == 200
+    staged = [name for name, _mime, _content in runtime.staged[0][1]]
+    assert staged == STAGED_NAMES
+    assert all("columns.json" not in a["filename"] for a in response.json()["attachments"])
+    assert "deidentification" not in json.dumps(response.json())  # the browser never gets it
+
+
+def test_fetch_delivery_returns_files_and_the_validated_record() -> None:
+    from utils.upload_plug import PlugDelivery, fetch_delivery
+
+    settings = UploadPlugSettings(url=PLUG_URL, secret=SECRET, transport=httpx.MockTransport(FakePlug()))
+    delivery = fetch_delivery(
+        settings, HANDLE, THREAD_ID, max_files=10, max_file_bytes=10**6, max_total_bytes=10**7
+    )
+    assert isinstance(delivery, PlugDelivery)
+    assert [name for name, _mime, _content in delivery.files] == STAGED_NAMES
+    assert delivery.record == _record_body()
+    assert list(delivery.summaries) == [DATASET_NAME]
+    assert "Riverbend" not in repr(delivery)  # nothing from the delivery in its repr
+
+
+@pytest.mark.parametrize("contract", ["2", "3"])
+def test_plug_older_contract_manifest_is_a_contract_mismatch(contract: str) -> None:
+    manifest = _manifest()
+    manifest["contract"] = contract
+    manifest["report"] = manifest.pop("record")
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug).startswith("CONTRACT_MISMATCH")
+    assert not plug.archive_requested
+
+
+def test_plug_contract_4_manifest_with_a_report_entry_is_refused() -> None:
+    manifest = _manifest()
+    manifest["report"] = manifest.pop("record")
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug) == "PLUG_REJECTED: the upload plug returned an invalid manifest"
+    assert not plug.archive_requested
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param(lambda m: m.pop("record"), id="missing"),
+        pytest.param(lambda m: m["record"].update(path="report/report.json"), id="old-path"),
+        pytest.param(lambda m: m["record"].update(path="metadata/columns.json"), id="path"),
+        pytest.param(lambda m: m["record"].update(mime="text/plain"), id="mime"),
+        pytest.param(lambda m: m["record"].update(size=0), id="empty"),
+        pytest.param(lambda m: m["record"].update(size=-1), id="negative"),
+        pytest.param(lambda m: m["record"].update(size=True), id="bool-size"),
+        pytest.param(lambda m: m["record"].update(size=2 * 1024 * 1024 + 1), id="too-large"),
+        pytest.param(lambda m: m["record"].update(sha256="A" * 64), id="digest"),
+        pytest.param(lambda m: m["record"].update(name="x"), id="extra-field"),
+        pytest.param(lambda m: m.update(record=[]), id="not-an-object"),
+    ],
+)
+def test_plug_bad_record_entry_is_refused_before_fetch(change) -> None:
+    manifest = _manifest()
+    change(manifest)
+    plug = FakePlug(manifest=manifest)
+    assert _refused(plug).startswith("PLUG_REJECTED")
+    assert not plug.archive_requested
+
+
+def test_plug_record_up_to_2_mib_is_not_refused_before_fetch() -> None:
+    # The cap is 2 MiB (contract 3 allowed 64 KiB): such an entry passes the manifest checks.
+    manifest = _manifest()
+    manifest["record"]["size"] = 2 * 1024 * 1024
+    manifest["archive"]["size"] = 2 * 1024 * 1024  # under the bound, so the archive is fetched
+    plug = FakePlug(manifest=manifest)
+    _refused(plug)
+    assert plug.archive_requested
+
+
+INVALID_RECORD = "PLUG_REJECTED: the plug's record is invalid"
+
+
+def _record_refusal(record: bytes, archive: bytes | None = None, members=MEMBERS) -> str:
+    manifest = _manifest(members, record=record, archive=archive)
+    archive = _member_zip(members, record=record) if archive is None else archive
+    plug = FakePlug(members, manifest=manifest, archive=archive)
+    detail = _refused(plug)
+    assert plug.archive_requested
+    return detail
+
+
+def _changed(change) -> bytes:
+    body = _record_body()
+    change(body)
+    return _encode(body)
+
+
+LONG = "x" * 1025
+
+RECORD_CHANGES = {
+    # top level
+    **{f"missing-{key}": (lambda key: lambda b: b.pop(key))(key) for key in _record_body()},
+    "extra-key": lambda b: b.update(tallies=[]),
+    "contract-3": lambda b: b.update(contract="3"),
+    "contract-int": lambda b: b.update(contract=4),
+    "method-unknown": lambda b: b.update(method="limited_data_set"),
+    "method-case": lambda b: b.update(method="Safe_Harbor"),
+    "method-list": lambda b: b.update(method=["safe_harbor"]),
+    "method-object": lambda b: b.update(method={}),
+    "contract-list": lambda b: b.update(contract=["4"]),
+    "model-long": lambda b: b.update(model=LONG),
+    "model-not-text": lambda b: b.update(model=None),
+    "prompt-version-int": lambda b: b.update(prompt_version=1),
+    "request-hash-missing": lambda b: b.pop("request_sha256"),
+    "request-hash-not-hex": lambda b: b.update(request_sha256="Z" * 64),
+    "request-hash-int": lambda b: b.update(request_sha256=7),
+    "gate-long": lambda b: b.update(gate=LONG),
+    "statement-long": lambda b: b.update(statement=LONG),
+    "not-sent-text": lambda b: b.update(not_sent="README.txt"),
+    "not-sent-item": lambda b: b.update(not_sent=[1]),
+    "not-sent-long": lambda b: b.update(not_sent=[LONG]),
+    "unchanged-item": lambda b: b.update(unchanged_files=[None]),
+    "unchanged-long": lambda b: b.update(unchanged_files=[LONG]),
+    "columns-object": lambda b: b.update(columns={}),
+    "risk-object": lambda b: b.update(risk={}),
+    # columns
+    **{
+        f"column-missing-{key}": (lambda key: lambda b: b["columns"][0].pop(key))(key)
+        for key in _column("f", "h")
+    },
+    "column-extra": lambda b: b["columns"][0].update(value="S001"),
+    "column-not-object": lambda b: b["columns"].append("id"),
+    "column-file-int": lambda b: b["columns"][0].update(file=1),
+    "column-file-long": lambda b: b["columns"][0].update(file=LONG),
+    "column-sheet-negative": lambda b: b["columns"][0].update(sheet=-1),
+    "column-sheet-text": lambda b: b["columns"][0].update(sheet="0"),
+    "column-sheet-bool": lambda b: b["columns"][0].update(sheet=False),
+    "column-header-long": lambda b: b["columns"][0].update(header=LONG),
+    "column-header-null": lambda b: b["columns"][0].update(header=None),
+    "column-action-unsure": lambda b: b["columns"][0].update(action="unsure"),
+    "column-action-upper": lambda b: b["columns"][0].update(action="NAME"),
+    "column-action-int": lambda b: b["columns"][0].update(action=1),
+    "column-written-long": lambda b: b["columns"][0].update(written=LONG),
+    "column-source-unknown": lambda b: b["columns"][0].update(source="gate"),
+    "column-source-list": lambda b: b["columns"][0].update(source=[]),
+    "column-source-object": lambda b: b["columns"][0].update(source={}),
+    "column-action-list": lambda b: b["columns"][0].update(action=["name"]),
+    "column-action-object": lambda b: b["columns"][0].update(action={}),
+    "column-file-list": lambda b: b["columns"][0].update(file=["data/x.csv"]),
+    "column-reason-words": lambda b: b["columns"][0].update(reason="the model said so"),
+    "column-reason-int": lambda b: b["columns"][0].update(reason=3),
+    "column-reason-empty": lambda b: b["columns"][0].update(reason=""),
+    "column-cells-negative": lambda b: b["columns"][0].update(cells_changed=-1),
+    "column-cells-float": lambda b: b["columns"][0].update(cells_changed=1.5),
+    "column-cells-bool": lambda b: b["columns"][0].update(cells_changed=True),
+    "column-note-long": lambda b: b["columns"][0].update(note=LONG),
+    # risk
+    **{
+        f"risk-missing-{key}": (lambda key: lambda b: b["risk"][0].pop(key))(key)
+        for key in _risk("f")
+    },
+    "risk-extra": lambda b: b["risk"][0].update(values=["S001"]),
+    "risk-not-object": lambda b: b["risk"].append([]),
+    "risk-sheet-negative": lambda b: b["risk"][0].update(sheet=-1),
+    "risk-columns-too-many": lambda b: b["risk"][0].update(columns=["c"] * 65),
+    "risk-columns-long": lambda b: b["risk"][0].update(columns=[LONG]),
+    "risk-columns-item-int": lambda b: b["risk"][0].update(columns=[1]),
+    "risk-columns-text": lambda b: b["risk"][0].update(columns="visit"),
+    "risk-rows-negative": lambda b: b["risk"][0].update(rows=-1),
+    "risk-classes-text": lambda b: b["risk"][0].update(classes="3"),
+    "risk-unique-bool": lambda b: b["risk"][0].update(unique_rows=True),
+    "risk-small-float": lambda b: b["risk"][0].update(small_rows=1.0),
+    "risk-with-dates-int": lambda b: b["risk"][0].update(with_dates=1),
+    "risk-with-dates-text": lambda b: b["risk"][0].update(with_dates="true"),
+    "risk-file-object": lambda b: b["risk"][0].update(file={}),
+    # the record must describe the delivered datasets, and only them
+    "column-for-another-file": lambda b: b["columns"][0].update(file="data/other.csv"),
+    "column-for-a-form": lambda b: b["columns"][0].update(file="forms/baseline_crf_blank.pdf"),
+    "risk-for-another-file": lambda b: b["risk"][0].update(file="data/other.csv"),
+    "dataset-without-columns": lambda b: b.update(columns=[]),
+}
+
+
+@pytest.mark.parametrize("change", list(RECORD_CHANGES.values()), ids=list(RECORD_CHANGES))
+def test_plug_invalid_record_is_refused(change) -> None:
+    assert _record_refusal(_changed(change)) == INVALID_RECORD
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        pytest.param(b"not json", id="not-json"),
+        pytest.param(b"[1, 2]", id="not-object"),
+        pytest.param(_record().replace(b'"gate":"0.44.0"', b'"gate":"0.44.0\xc3\xa9"'), id="not-ascii"),
+        pytest.param(_record().replace(b'"gate":"0.44.0"', b'"gate":"0.44.0","gate":"x"'), id="duplicate-key"),
+        pytest.param(_record().replace(b'"rows":200', b'"rows":NaN'), id="nan"),
+        pytest.param(_record().replace(b'"rows":200', b'"rows":2e2'), id="float"),
+        pytest.param(b"[" * 100_000 + b"]" * 100_000, id="deep"),
+    ],
+)
+def test_plug_unreadable_record_is_refused(record: bytes) -> None:
+    assert _record_refusal(record) == INVALID_RECORD
+
+
+def test_plug_record_with_escaped_text_is_accepted() -> None:
+    # ASCII-escaped JSON: a header with a non-ASCII letter arrives as \\u escapes.
+    record = _changed(lambda b: b["columns"][1].update(header="ann\u00e9e"))
+    assert b"\\u00e9" in record
+    runtime = FakeRuntime()
+    plug = FakePlug(manifest=_manifest(record=record), archive=_member_zip(record=record))
+    assert _pull(_plug_client(runtime, plug)).status_code == 200
+
+
+def test_plug_record_strings_up_to_1024_characters_are_accepted() -> None:
+    record = _changed(lambda b: [b.update(statement="s" * 1024), b["columns"][0].update(header="h" * 1024)])
+    runtime = FakeRuntime()
+    plug = FakePlug(manifest=_manifest(record=record), archive=_member_zip(record=record))
+    assert _pull(_plug_client(runtime, plug)).status_code == 200
+
+
+def test_plug_record_hash_differing_from_the_manifest_is_refused() -> None:
+    record = _record()
+    tampered = record.replace(b'"rows":200', b'"rows":201')
+    assert len(tampered) == len(record)
+    detail = _record_refusal(record, archive=_member_zip(record=tampered))
+    assert detail == "PLUG_REJECTED: the plug's record did not match its checksum"
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        pytest.param([(p, c) for p, _m, c in MEMBERS], id="record-missing"),
+        pytest.param([(RECORD_PATH, _record())] + [(p, c) for p, _m, c in MEMBERS], id="record-first"),
+        pytest.param(
+            [(p, c) for p, _m, c in MEMBERS[:1]] + [(RECORD_PATH, _record())] + [(p, c) for p, _m, c in MEMBERS[1:]],
+            id="record-in-the-middle",
+        ),
+        pytest.param([(p, c) for p, _m, c in MEMBERS] + [(RECORD_PATH, _record())] * 2, id="record-twice"),
+        pytest.param(
+            [(p, c) for p, _m, c in MEMBERS] + [("report/report.json", _record())], id="old-report-path"
+        ),
+    ],
+)
+def test_plug_archive_without_the_record_last_is_refused(entries) -> None:
+    detail = _archive_refusal(_zip(entries))
+    assert detail == "PLUG_REJECTED: the prepared archive does not match its manifest"
+
+
+@pytest.mark.parametrize(
+    "uploaded, delivered",
+    [
+        # the record names a file by its path in the uploaded ZIP; the delivery by its role
+        # folder and the name with the extension it is written with
+        ("data/followup/Follow up visits.csv", "dataset/Follow up visits.csv"),
+        ("Dataset/VISITS.CSV", "dataset/visits.csv"),
+        ("data/Visits (v2).xls", "dataset/Visits (v2).xlsx"),
+        ("data/Visits.XLSX", "dataset/Visits.xlsx"),
+        ("dataset/visits.tsv", "dataset/visits.tsv"),
+    ],
+)
+def test_plug_record_columns_join_their_delivered_file(uploaded: str, delivered: str) -> None:
+    mime = {
+        "csv": "text/csv",
+        "tsv": "text/tab-separated-values",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }[delivered.rsplit(".", 1)[1]]
+    members = [(delivered, mime, DATASET)]
+    body = _record_body(members)
+    for row in body["columns"] + body["risk"]:
+        row["file"] = uploaded
+    record = _encode(body)
+    runtime = FakeRuntime()
+    plug = FakePlug(members, manifest=_manifest(members, record=record), archive=_member_zip(members, record=record))
+    response = _pull(_plug_client(runtime, plug))
+    assert response.status_code == 200, response.text
+    summary = runtime.deidentification[0][delivered.split("/", 1)[1]]
+    assert summary["kept_columns"] == 2
+    assert [c["header"] for c in summary["changed_columns"]] == ["id"]
+    assert len(summary["risk"]) == 1
+
+
+def test_plug_record_with_two_datasets_keeps_each_its_own_columns() -> None:
+    members = [
+        ("dataset/visits.csv", "text/csv", DATASET),
+        ("dataset/labs.csv", "text/csv", DATASET),
+        MEMBERS[1],
+    ]
+    body = _record_body(members, method="expert_determination")
+    body["columns"].append(
+        _column("dataset/labs.csv", "draw_date", "date", "dates shifted by a secret number of days per participant; intervals kept")
+    )
+    record = _encode(body)
+    runtime = FakeRuntime()
+    plug = FakePlug(members, manifest=_manifest(members, record=record), archive=_member_zip(members, record=record))
+    assert _pull(_plug_client(runtime, plug)).status_code == 200
+    summaries = runtime.deidentification[0]
+    assert sorted(summaries) == ["labs.csv", "visits.csv"]
+    assert [c["header"] for c in summaries["visits.csv"]["changed_columns"]] == ["id"]
+    assert [c["header"] for c in summaries["labs.csv"]["changed_columns"]] == ["id", "draw_date"]
+    assert {s["method"] for s in summaries.values()} == {"expert_determination"}
+
+
+# --- Gate required (REPORT_AGENT_UPLOAD_PLUG_REQUIRED) ---------------------------
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", " yes ", "Yes"])
+def test_required_setting_truthy_values(value: str) -> None:
+    from utils.upload_plug import parse_required
+
+    assert parse_required(value) is True
+
+
+@pytest.mark.parametrize("value", [None, "", "  ", "0", "false", "FALSE", "no"])
+def test_required_setting_off_values(value) -> None:
+    from utils.upload_plug import parse_required
+
+    assert parse_required(value) is False
+
+
+@pytest.mark.parametrize("value", ["2", "on", "off", "maybe", "ture", "y"])
+def test_required_setting_unknown_value_refuses_to_start(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_URL", raising=False)
+    monkeypatch.setenv("REPORT_AGENT_UPLOAD_PLUG_REQUIRED", value)
+    with pytest.raises(ValueError):
+        UploadPlugSettings.from_env()
+    with pytest.raises(ValueError):
+        create_app(FakeRuntime(), provider_api_key="unused")
+
+
+def test_required_setting_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_URL", raising=False)
+    monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_SECRET", raising=False)
+    monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_REQUIRED", raising=False)
+    assert UploadPlugSettings.from_env().required is False
+    monkeypatch.setenv("REPORT_AGENT_UPLOAD_PLUG_REQUIRED", "1")
+    settings = UploadPlugSettings.from_env()
+    assert settings.required is True
+    assert settings.enabled is False
+    assert settings.refuses_direct_uploads is True
+
+
+def _required_client(runtime: FakeRuntime) -> TestClient:
+    return TestClient(
+        create_app(runtime, provider_api_key="unused", upload_plug=UploadPlugSettings(required=True))
+    )
+
+
+def test_required_and_unconfigured_refuses_every_direct_upload() -> None:
+    runtime = FakeRuntime()
+    client = _required_client(runtime)
+    response = client.post(
+        f"/api/threads/{THREAD_ID}/attachments",
+        files=[("files", ("study.csv", b"a,b\n1,2\n", "text/csv"))],
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "UPLOAD_PLUG_REQUIRED: uploads are disabled until the upload checker is configured"
+    )
+    assert runtime.staged == []
+
+
+def test_required_and_unconfigured_refuses_before_reading_the_body() -> None:
+    runtime = FakeRuntime()
+    sent = _refuses_before_reading_the_body(_required_client(runtime).app)
+    assert sent[0]["status"] == 409
+    assert b"UPLOAD_PLUG_REQUIRED" in b"".join(m.get("body", b"") for m in sent)
+    assert runtime.staged == []
+
+
+def test_required_and_unconfigured_route_refuses_too() -> None:
+    # The route keeps its own check beside the middleware's.
+    from api.server import AttachmentRequestBodyLimitMiddleware
+
+    runtime = FakeRuntime()
+    app = create_app(runtime, provider_api_key="unused", upload_plug=UploadPlugSettings(required=True))
+    app.user_middleware = [m for m in app.user_middleware if m.cls is not AttachmentRequestBodyLimitMiddleware]
+    response = TestClient(app).post(
+        f"/api/threads/{THREAD_ID}/attachments",
+        files=[("files", ("study.csv", b"a,b\n1,2\n", "text/csv"))],
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("UPLOAD_PLUG_REQUIRED")
+    assert runtime.staged == []
+
+
+def test_required_and_unconfigured_info_says_so() -> None:
+    client = _required_client(FakeRuntime())
+    assert client.get("/api/upload-plug").json() == {"required": True, "configured": False}
+    assert _pull(client).status_code == 404
+
+
+def test_required_with_a_plug_behaves_as_a_plug() -> None:
+    runtime = FakeRuntime()
+    plug = FakePlug()
+    settings = UploadPlugSettings(url=PLUG_URL, secret=SECRET, transport=httpx.MockTransport(plug), required=True)
+    client = TestClient(create_app(runtime, provider_api_key="unused", upload_plug=settings))
+    info = client.get("/api/upload-plug").json()
+    assert info["origin"] == PLUG_URL and info["contract"] == "4"
+    response = client.post(
+        f"/api/threads/{THREAD_ID}/attachments",
+        files=[("files", ("raw.csv", b"name\nJane\n", "text/csv"))],
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "UPLOAD_PLUG_REQUIRED: uploads go through the upload plug; attach a ZIP with the paperclip"
+    )
+    assert _pull(client).status_code == 200
+
+
+def test_not_required_and_unconfigured_is_unchanged() -> None:
+    runtime = FakeRuntime()
+    client = TestClient(
+        create_app(runtime, provider_api_key="unused", upload_plug=UploadPlugSettings(required=False))
+    )
+    assert client.get("/api/upload-plug").json() is None
+    response = client.post(
+        f"/api/threads/{THREAD_ID}/attachments",
+        files=[("files", ("study.csv", b"a,b\n1,2\n", "text/csv"))],
+    )
+    assert response.status_code == 200
+    assert runtime.staged == [(THREAD_ID, [("study.csv", "text/csv", b"a,b\n1,2\n")])]

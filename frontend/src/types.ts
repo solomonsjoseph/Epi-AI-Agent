@@ -182,6 +182,12 @@ export interface UploadPlugInfo {
   caps: UploadPlugCaps;
 }
 
+// The app requires the upload checker but none is configured: uploads are off.
+export interface UploadPlugUnconfigured {
+  required: true;
+  configured: false;
+}
+
 export interface AttachmentUploadResult {
   attachments: AttachmentManifestSummary[];
   errors: AttachmentUploadError[];

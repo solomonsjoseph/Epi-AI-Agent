@@ -83,6 +83,25 @@ function renderModal() {
 describe("UploadPlugModal message gate", () => {
   afterEach(() => vi.useRealTimers());
 
+  it("lets the checker page save its record and nothing more", () => {
+    const { frame } = renderModal();
+    expect(frame.getAttribute("sandbox")).toBe(
+      "allow-scripts allow-same-origin allow-forms allow-downloads",
+    );
+  });
+
+  it("waits for the researcher on the checker page without a time limit once it is ready", () => {
+    vi.useFakeTimers();
+    const { callbacks, send } = renderModal();
+    send({ type: "ready", contract: "1" });
+    act(() => {
+      vi.advanceTimersByTime(20 * 60 * 1000);
+    });
+    expect(callbacks.onError).not.toHaveBeenCalled();
+    send({ type: "done", contract: "1", thread_id: "t1", handle: HANDLE });
+    expect(callbacks.onDone).toHaveBeenCalledWith(HANDLE);
+  });
+
   it("posts the file only to the plug origin after a ready from the frame", () => {
     const { file, posted, send, frame } = renderModal();
     expect(frame.getAttribute("src")).toBe("http://127.0.0.1:8090/embed?thread_id=t1&contract=1");

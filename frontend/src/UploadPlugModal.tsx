@@ -174,7 +174,7 @@ export default function UploadPlugModal({
           className="upload-plug-frame"
           ref={frameRef}
           referrerPolicy="no-referrer"
-          sandbox="allow-scripts allow-same-origin allow-forms"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-downloads"
           src={src}
           title="Study upload preparation"
         />

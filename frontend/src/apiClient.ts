@@ -2,6 +2,7 @@ import type {
   ApiThreadState,
   AttachmentUploadResult,
   UploadPlugInfo,
+  UploadPlugUnconfigured,
   CompletedAnalysisResult,
   DatasetPreview,
   DatasetProvenance,
@@ -245,9 +246,22 @@ export async function uploadAttachments(
 export async function getUploadPlug(
   fetchImpl: FetchImpl = fetch,
   apiBase = "",
-): Promise<UploadPlugInfo | null> {
+): Promise<UploadPlugInfo | UploadPlugUnconfigured | null> {
   const response = await fetchImpl(apiUrl(apiBase, "/api/upload-plug"));
-  return parseJsonResponse<UploadPlugInfo | null>(response);
+  return parseJsonResponse<UploadPlugInfo | UploadPlugUnconfigured | null>(
+    response,
+  );
+}
+
+export function isUploadPlugUnconfigured(
+  value: unknown,
+): value is UploadPlugUnconfigured {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).required === true &&
+    (value as Record<string, unknown>).configured === false
+  );
 }
 
 export async function stagePlugAttachments(
