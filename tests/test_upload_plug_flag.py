@@ -544,6 +544,7 @@ def _plug_record(**override) -> dict:
         "model": SENTINELS["model"],
         "not_sent": [SENTINELS["not_sent"]],
         "prompt_version": SENTINELS["prompt_version"],
+        "request_sha256": "cd" * 32,
         "risk": [
             {
                 "classes": 2,
@@ -656,6 +657,7 @@ def test_plug_route_stages_flagged_files_in_the_real_store(tmp_path) -> None:
             assert b"record/columns.json" not in data, stored
             for sentinel in ("statement", "model", "prompt_version", "gate", "not_sent", "unchanged", "note", "reason"):
                 assert SENTINELS[sentinel].encode() not in data, (stored, sentinel)
+            assert ("cd" * 32).encode() not in data, stored  # the checker's audit reference stays with the checker
 
 
 def test_plug_route_keeps_the_record_summary_on_the_dataset_only(tmp_path) -> None:

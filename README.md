@@ -181,7 +181,7 @@ query `thread_id`, no redirects, no proxy settings from the environment):
   stored or deflated only, each with its manifest size and sha256, and the
   record must be the last entry.
 - The record is the checker's per-column record: `contract`, `method`, `model`,
-  `prompt_version`, `gate`, `statement`, `not_sent`, `unchanged_files`,
+  `prompt_version`, `gate`, `request_sha256`, `statement`, `not_sent`, `unchanged_files`,
   `columns` (per column: `file`, `sheet`, `header`, `action`, `written`,
   `source`, `reason`, `cells_changed`, `note`) and `risk` (uniqueness counts per
   table). The app checks its sha256 and validates it strictly: ASCII JSON,

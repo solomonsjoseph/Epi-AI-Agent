@@ -81,6 +81,7 @@ _RECORD_KEYS = {
     "model",
     "prompt_version",
     "gate",
+    "request_sha256",
     "statement",
     "not_sent",
     "unchanged_files",
@@ -588,6 +589,9 @@ def _check_record(body: bytes) -> dict[str, Any]:
     _code(record["method"], RECORD_METHODS)
     for key in ("model", "prompt_version", "gate", "statement"):
         _text(record[key])
+    # the checker's audit reference for this delivery: checked for shape, kept out of the model's context
+    if not isinstance(record["request_sha256"], str) or not _SHA256_RE.fullmatch(record["request_sha256"]):
+        raise _invalid_record()
     _texts(record["not_sent"])
     _texts(record["unchanged_files"])
     if not isinstance(record["columns"], list) or not isinstance(record["risk"], list):
