@@ -2360,6 +2360,7 @@ class ReportAgentApiRuntime:
         uploads: list[tuple[str, str, bytes]] | None = None,
         *,
         deidentified: bool = False,
+        deidentification: dict[str, dict[str, Any]] | None = None,
     ) -> AttachmentUploadResult:
         if isinstance(identity, RequestIdentity):
             assert isinstance(thread_id, str)
@@ -2391,6 +2392,12 @@ class ReportAgentApiRuntime:
                     mime,
                     content,
                     deidentified=deidentified,
+                    # per staged file name: the plug record's summary for that dataset file
+                    deidentification=(
+                        (deidentification or {}).get(filename)
+                        if deidentified is True
+                        else None
+                    ),
                 )
             except AttachmentError as exc:
                 errors.append(

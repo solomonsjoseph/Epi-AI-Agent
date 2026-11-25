@@ -478,7 +478,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Conversation not found") from exc
         limits = runtime.attachment_limits
         try:
-            uploads = fetch_delivery(
+            delivery = fetch_delivery(
                 plug,
                 request.handle,
                 thread_id,
@@ -494,7 +494,11 @@ def create_app(
             ) from exc
         try:
             result = runtime.stage_attachments(
-                identity, thread_id, uploads, deidentified=True
+                identity,
+                thread_id,
+                delivery.files,
+                deidentified=True,
+                deidentification=delivery.summaries,
             )
         except AttachmentError as exc:
             raise HTTPException(

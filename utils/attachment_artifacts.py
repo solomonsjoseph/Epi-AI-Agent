@@ -427,8 +427,10 @@ class LocalAttachmentStore:
         content: bytes,
         *,
         deidentified: bool = False,
+        deidentification: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        # deidentified is set only by the server's upload plug route, never from a request.
+        # deidentified and deidentification are set only by the server's upload plug route,
+        # never from a request.
         if len(content) > self.limits.max_bytes:
             raise AttachmentError(
                 "FILE_TOO_LARGE",
@@ -458,6 +460,9 @@ class LocalAttachmentStore:
             # Only files pulled through the upload plug carry the key; plain uploads keep
             # their manifest shape unchanged.
             manifest["deidentified"] = True
+            if isinstance(deidentification, dict):
+                # A plug dataset file keeps its summary of the plug's per-column record.
+                manifest["deidentification"] = deidentification
         if isinstance(scope, ThreadStorageScope):
             manifest["owner_user_id"] = scope.owner_user_id
         self._atomic_write(content_path, content)
