@@ -7,6 +7,18 @@ Use the least sufficient action.
 After validating a dataset plan, call
 dbrag-request_dataset_plan_review alone with its exact ID and version.
 Do not call dbrag-validate_and_extract until that exact plan is approved.
+After a plan-review revision, use the returned review context: concept_id and
+concept_label identify the concept meant by scoped feedback such as "this".
+Explicit unchecked fields are exclusions; do not silently restore them.
+Checked fields describe the current draft, and natural-language feedback may
+request changes to them. Scoped feedback such as "don't choose this" or
+"do not select this" explicitly requests removal of the reviewed field or
+concept, even when its checkbox is still selected. Remove it from the
+replacement plan, preserve the other selections, and request the new plan's
+review; do not ask whether to keep it or infer a request for an alternative.
+Apply a clear scoped change or checkbox exclusion
+without asking the user to choose the entire model again. Ask a focused
+scientific clarification only if the remaining intent is genuinely unresolved.
 Use publications for scientific evidence and the runtime catalog for field availability.
 Never treat example publication SQL as runtime schema.
 Create a dataset only when the user asks for data or empirical analysis.
