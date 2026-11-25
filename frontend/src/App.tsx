@@ -1,5 +1,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, createApiClient, type ApiClient } from "./apiClient";
+import {
+  ApiError,
+  createApiClient,
+  isUploadPlugUnconfigured,
+  type ApiClient,
+} from "./apiClient";
 import AgentActivityTimeline from "./AgentActivityTimeline";
 import AttachmentComposer from "./AttachmentComposer";
 import UploadPlugModal from "./UploadPlugModal";
@@ -209,6 +214,8 @@ export default function App({
   // answer fails, attaching stays disabled: an unknown checker state never falls back to "off".
   const [uploadPlugChecked, setUploadPlugChecked] = useState(false);
   const [uploadPlugCheckFailed, setUploadPlugCheckFailed] = useState(false);
+  // The app requires the upload checker and none is configured: attaching stays off.
+  const [uploadPlugMissing, setUploadPlugMissing] = useState(false);
   const [pendingPlugUpload, setPendingPlugUpload] = useState<{
     threadId: string;
     generation: number;
@@ -233,7 +240,9 @@ export default function App({
       Promise.resolve(apiClient.getUploadPlug?.())
         .then((plug) => {
           if (isMounted) {
-            setUploadPlug(plug ?? null);
+            const missing = isUploadPlugUnconfigured(plug);
+            setUploadPlug(missing ? null : plug ?? null);
+            setUploadPlugMissing(missing);
             setUploadPlugChecked(true);
             setUploadPlugCheckFailed(false);
           }
@@ -243,6 +252,7 @@ export default function App({
             return;
           }
           setUploadPlug(null);
+          setUploadPlugMissing(false);
           setUploadPlugChecked(false);
           setUploadPlugCheckFailed(true);
           retryTimer = window.setTimeout(
@@ -908,7 +918,7 @@ export default function App({
   }
 
   async function selectAttachments(files: File[]) {
-    if (!runtimeOptions || !files.length || isBusy) {
+    if (!runtimeOptions || !files.length || isBusy || uploadPlugMissing) {
       return;
     }
     if (uploadPlug) {
@@ -1582,9 +1592,12 @@ export default function App({
               onRemove={removeStagedAttachment}
               staged={stagedAttachments}
               zipOnly={uploadPlug !== null}
-              checkerOff={uploadPlugChecked && uploadPlug === null}
-              attachDisabled={!uploadPlugChecked}
+              checkerOff={
+                uploadPlugChecked && uploadPlug === null && !uploadPlugMissing
+              }
+              attachDisabled={!uploadPlugChecked || uploadPlugMissing}
               checkerUnknown={uploadPlugCheckFailed}
+              checkerRequired={uploadPlugMissing}
             />
           </form>
           {uploadPlug && pendingPlugUpload ? (

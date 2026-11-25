@@ -33,6 +33,10 @@ CONTRACT_VERSION = "4"
 PLUG_URL_ENV = "REPORT_AGENT_UPLOAD_PLUG_URL"
 PLUG_SECRET_ENV = "REPORT_AGENT_UPLOAD_PLUG_SECRET"
 PLUG_TIMEOUT_ENV = "REPORT_AGENT_UPLOAD_PLUG_TIMEOUT_SECONDS"
+PLUG_REQUIRED_ENV = "REPORT_AGENT_UPLOAD_PLUG_REQUIRED"
+
+_TRUE_VALUES = {"1", "true", "yes"}
+_FALSE_VALUES = {"", "0", "false", "no"}
 
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -142,10 +146,18 @@ class UploadPlugSettings:
     secret: str = field(default="", repr=False)
     timeout_seconds: float = 30.0
     transport: httpx.BaseTransport | None = None
+    # Opt-in: when set and no plug URL is configured, direct uploads are refused instead
+    # of falling back to the plain file picker. Off by default.
+    required: bool = False
 
     @property
     def enabled(self) -> bool:
         return bool(self.url)
+
+    @property
+    def refuses_direct_uploads(self) -> bool:
+        """With a plug, uploads go through it; with none but required, uploads are off."""
+        return self.enabled or self.required
 
     @property
     def origin(self) -> str:
@@ -164,6 +176,7 @@ class UploadPlugSettings:
             url=(os.getenv(PLUG_URL_ENV) or "").strip().rstrip("/"),
             secret=(os.getenv(PLUG_SECRET_ENV) or "").strip(),
             timeout_seconds=float(os.getenv(PLUG_TIMEOUT_ENV) or "30"),
+            required=parse_required(os.getenv(PLUG_REQUIRED_ENV)),
         )
         settings.validate()
         return settings
@@ -192,6 +205,17 @@ class UploadPlugSettings:
             )
         if self.timeout_seconds <= 0:
             raise ValueError(f"{PLUG_TIMEOUT_ENV} must be positive")
+
+
+def parse_required(value: str | None) -> bool:
+    """``1``, ``true`` or ``yes`` turn the setting on; empty, ``0``, ``false`` or ``no`` leave it
+    off. Anything else refuses to start, so a typo never leaves uploads unchecked."""
+    text = (value or "").strip().lower()
+    if text in _TRUE_VALUES:
+        return True
+    if text in _FALSE_VALUES:
+        return False
+    raise ValueError(f"{PLUG_REQUIRED_ENV} must be 1, true, yes, 0, false, no or empty")
 
 
 def quiet_http_logs() -> None:

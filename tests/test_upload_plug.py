@@ -85,6 +85,7 @@ def runtime() -> FakeRuntime:
 def client(runtime: FakeRuntime, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_URL", raising=False)
     monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_SECRET", raising=False)
+    monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_REQUIRED", raising=False)
     return TestClient(create_app(runtime, provider_api_key="unused"))
 
 
@@ -1426,3 +1427,124 @@ def test_plug_record_with_two_datasets_keeps_each_its_own_columns() -> None:
     assert [c["header"] for c in summaries["visits.csv"]["changed_columns"]] == ["id"]
     assert [c["header"] for c in summaries["labs.csv"]["changed_columns"]] == ["id", "draw_date"]
     assert {s["method"] for s in summaries.values()} == {"expert_determination"}
+
+
+# --- Gate required (REPORT_AGENT_UPLOAD_PLUG_REQUIRED) ---------------------------
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", " yes ", "Yes"])
+def test_required_setting_truthy_values(value: str) -> None:
+    from utils.upload_plug import parse_required
+
+    assert parse_required(value) is True
+
+
+@pytest.mark.parametrize("value", [None, "", "  ", "0", "false", "FALSE", "no"])
+def test_required_setting_off_values(value) -> None:
+    from utils.upload_plug import parse_required
+
+    assert parse_required(value) is False
+
+
+@pytest.mark.parametrize("value", ["2", "on", "off", "maybe", "ture", "y"])
+def test_required_setting_unknown_value_refuses_to_start(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_URL", raising=False)
+    monkeypatch.setenv("REPORT_AGENT_UPLOAD_PLUG_REQUIRED", value)
+    with pytest.raises(ValueError):
+        UploadPlugSettings.from_env()
+    with pytest.raises(ValueError):
+        create_app(FakeRuntime(), provider_api_key="unused")
+
+
+def test_required_setting_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_URL", raising=False)
+    monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_SECRET", raising=False)
+    monkeypatch.delenv("REPORT_AGENT_UPLOAD_PLUG_REQUIRED", raising=False)
+    assert UploadPlugSettings.from_env().required is False
+    monkeypatch.setenv("REPORT_AGENT_UPLOAD_PLUG_REQUIRED", "1")
+    settings = UploadPlugSettings.from_env()
+    assert settings.required is True
+    assert settings.enabled is False
+    assert settings.refuses_direct_uploads is True
+
+
+def _required_client(runtime: FakeRuntime) -> TestClient:
+    return TestClient(
+        create_app(runtime, provider_api_key="unused", upload_plug=UploadPlugSettings(required=True))
+    )
+
+
+def test_required_and_unconfigured_refuses_every_direct_upload() -> None:
+    runtime = FakeRuntime()
+    client = _required_client(runtime)
+    response = client.post(
+        f"/api/threads/{THREAD_ID}/attachments",
+        files=[("files", ("study.csv", b"a,b\n1,2\n", "text/csv"))],
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "UPLOAD_PLUG_REQUIRED: uploads are disabled until the upload checker is configured"
+    )
+    assert runtime.staged == []
+
+
+def test_required_and_unconfigured_refuses_before_reading_the_body() -> None:
+    runtime = FakeRuntime()
+    sent = _refuses_before_reading_the_body(_required_client(runtime).app)
+    assert sent[0]["status"] == 409
+    assert b"UPLOAD_PLUG_REQUIRED" in b"".join(m.get("body", b"") for m in sent)
+    assert runtime.staged == []
+
+
+def test_required_and_unconfigured_route_refuses_too() -> None:
+    # The route keeps its own check beside the middleware's.
+    from api.server import AttachmentRequestBodyLimitMiddleware
+
+    runtime = FakeRuntime()
+    app = create_app(runtime, provider_api_key="unused", upload_plug=UploadPlugSettings(required=True))
+    app.user_middleware = [m for m in app.user_middleware if m.cls is not AttachmentRequestBodyLimitMiddleware]
+    response = TestClient(app).post(
+        f"/api/threads/{THREAD_ID}/attachments",
+        files=[("files", ("study.csv", b"a,b\n1,2\n", "text/csv"))],
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("UPLOAD_PLUG_REQUIRED")
+    assert runtime.staged == []
+
+
+def test_required_and_unconfigured_info_says_so() -> None:
+    client = _required_client(FakeRuntime())
+    assert client.get("/api/upload-plug").json() == {"required": True, "configured": False}
+    assert _pull(client).status_code == 404
+
+
+def test_required_with_a_plug_behaves_as_a_plug() -> None:
+    runtime = FakeRuntime()
+    plug = FakePlug()
+    settings = UploadPlugSettings(url=PLUG_URL, secret=SECRET, transport=httpx.MockTransport(plug), required=True)
+    client = TestClient(create_app(runtime, provider_api_key="unused", upload_plug=settings))
+    info = client.get("/api/upload-plug").json()
+    assert info["origin"] == PLUG_URL and info["contract"] == "4"
+    response = client.post(
+        f"/api/threads/{THREAD_ID}/attachments",
+        files=[("files", ("raw.csv", b"name\nJane\n", "text/csv"))],
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "UPLOAD_PLUG_REQUIRED: uploads go through the upload plug; attach a ZIP with the paperclip"
+    )
+    assert _pull(client).status_code == 200
+
+
+def test_not_required_and_unconfigured_is_unchanged() -> None:
+    runtime = FakeRuntime()
+    client = TestClient(
+        create_app(runtime, provider_api_key="unused", upload_plug=UploadPlugSettings(required=False))
+    )
+    assert client.get("/api/upload-plug").json() is None
+    response = client.post(
+        f"/api/threads/{THREAD_ID}/attachments",
+        files=[("files", ("study.csv", b"a,b\n1,2\n", "text/csv"))],
+    )
+    assert response.status_code == 200
+    assert runtime.staged == [(THREAD_ID, [("study.csv", "text/csv", b"a,b\n1,2\n")])]

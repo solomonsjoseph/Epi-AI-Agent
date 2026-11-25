@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import inspect
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from fastapi import (
@@ -77,6 +77,13 @@ class UploadPlugInfo(BaseModel):
     caps: UploadPlugCaps
 
 
+class UploadPlugUnconfigured(BaseModel):
+    """The upload checker is required but not configured: attaching is off until it is."""
+
+    required: Literal[True] = True
+    configured: Literal[False] = False
+
+
 class PlugAttachmentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -84,6 +91,14 @@ class PlugAttachmentRequest(BaseModel):
 
 
 _UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+_PLUG_UPLOAD_REFUSAL = (
+    "UPLOAD_PLUG_REQUIRED: uploads go through the upload "
+    "plug; attach a ZIP with the paperclip"
+)
+_UNCONFIGURED_UPLOAD_REFUSAL = (
+    "UPLOAD_PLUG_REQUIRED: uploads are disabled until the upload "
+    "checker is configured"
+)
 _MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 
 
@@ -109,12 +124,21 @@ def _content_disposition(disposition: str, filename: str) -> str:
 
 
 class AttachmentRequestBodyLimitMiddleware:
-    def __init__(self, app: Any, *, max_bytes: int, refuse_uploads: bool = False) -> None:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        max_bytes: int,
+        refuse_uploads: bool = False,
+        refusal_detail: str = _PLUG_UPLOAD_REFUSAL,
+    ) -> None:
         self.app = app
         self.max_bytes = max_bytes
-        # With the upload plug on, plain uploads are refused before any of the body is read,
-        # so raw file bytes never reach this process (no multipart parsing, no temp files).
+        # With the upload plug on (or required but not configured), plain uploads are refused
+        # before any of the body is read, so raw file bytes never reach this process (no
+        # multipart parsing, no temp files).
         self.refuse_uploads = refuse_uploads
+        self.refusal_detail = refusal_detail
 
     async def __call__(self, scope, receive, send) -> None:
         is_attachment_upload = (
@@ -128,12 +152,7 @@ class AttachmentRequestBodyLimitMiddleware:
         if self.refuse_uploads:
             response = JSONResponse(
                 status_code=409,
-                content={
-                    "detail": (
-                        "UPLOAD_PLUG_REQUIRED: uploads go through the upload "
-                        "plug; attach a ZIP with the paperclip"
-                    )
-                },
+                content={"detail": self.refusal_detail},
                 headers={"Connection": "close"},
             )
             await response(scope, receive, send)
@@ -245,6 +264,9 @@ def create_app(
     plug.validate()
     if plug.enabled:
         quiet_http_logs()
+    upload_refusal = (
+        _PLUG_UPLOAD_REFUSAL if plug.enabled else _UNCONFIGURED_UPLOAD_REFUSAL
+    )
 
     app.add_middleware(
         AttachmentRequestBodyLimitMiddleware,
@@ -252,7 +274,8 @@ def create_app(
             attachment_limits.max_message_bytes
             + _MULTIPART_OVERHEAD_BYTES
         ),
-        refuse_uploads=plug.enabled,
+        refuse_uploads=plug.refuses_direct_uploads,
+        refusal_detail=upload_refusal,
     )
 
     def provider_key_for_work(
@@ -405,14 +428,8 @@ def create_app(
     ) -> AttachmentUploadResult:
         try:
             runtime.authorize_thread(identity, thread_id)
-            if plug.enabled:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "UPLOAD_PLUG_REQUIRED: uploads go through the upload "
-                        "plug; attach a ZIP with the paperclip"
-                    ),
-                )
+            if plug.refuses_direct_uploads:
+                raise HTTPException(status_code=409, detail=upload_refusal)
             declared_length = http_request.headers.get("content-length")
             try:
                 content_length = (
@@ -444,9 +461,10 @@ def create_app(
     @api.get("/api/upload-plug")
     def upload_plug_info(
         _identity: RequestIdentity = Depends(local_request_identity),
-    ) -> UploadPlugInfo | None:
+    ) -> UploadPlugInfo | UploadPlugUnconfigured | None:
         if not plug.enabled:
-            return None
+            # Required but not configured: say so, so the UI shows that uploads are off.
+            return UploadPlugUnconfigured() if plug.required else None
         limits = runtime.attachment_limits
         return UploadPlugInfo(
             origin=plug.origin,

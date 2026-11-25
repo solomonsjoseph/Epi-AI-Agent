@@ -17,6 +17,8 @@ interface Props {
   attachDisabled?: boolean;
   // The app could not say whether a checker is configured; attaching stays off.
   checkerUnknown?: boolean;
+  // The app requires an upload checker and none is configured; attaching stays off.
+  checkerRequired?: boolean;
   onFilesSelected(files: File[]): void;
   onDismissError(index: number): void;
   onRemove(attachmentId: string): Promise<void>;
@@ -47,6 +49,7 @@ export default function AttachmentComposer({
   checkerOff = false,
   attachDisabled = false,
   checkerUnknown = false,
+  checkerRequired = false,
   onFilesSelected,
   onDismissError,
   onRemove,
@@ -172,6 +175,15 @@ export default function AttachmentComposer({
               title="The app could not report its upload settings. Attaching stays off and the check is retried."
             >
               Attaching unavailable, retrying
+            </span>
+          ) : null}
+          {checkerRequired ? (
+            <span
+              className="upload-checker-badge"
+              role="status"
+              title="This app requires an upload checker to check files for protected health information, and none is configured yet."
+            >
+              Uploads are disabled until the upload checker is configured
             </span>
           ) : null}
           {action}
